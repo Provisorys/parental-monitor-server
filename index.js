@@ -13,6 +13,11 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// Rota padrão para verificar se o servidor está ativo
+app.get('/', (req, res) => {
+    res.status(200).send('Servidor Parental Monitor rodando!');
+});
+
 // Configurar armazenamento com multer
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
