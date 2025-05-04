@@ -24,7 +24,8 @@ const storage = multer.diskStorage({
     },
     filename: (req, file, cb) => {
         const timestamp = Date.now();
-        cb(null, `${timestamp}-${file.originalname}`);
+        const childId = req.body.childId || 'unknown'; // Usar childId do corpo da requisição
+        cb(null, `${timestamp}-${childId}-${file.originalname}`);
     }
 });
 const upload = multer({ storage: storage });
@@ -54,9 +55,26 @@ app.get('/get-conversations/:childId', (req, res) => {
     const mediaList = files.map(file => ({
         filePath: `/${uploadDir}${file}`,
         timestamp: file.split('-')[0],
-        type: file.split('.').pop() === 'jpg' ? 'image' : 'audio'
+        type: file.split('.').pop() === 'jpg' ? 'image' : file.split('.').pop() === 'mp4' ? 'video' : 'audio'
     }));
     res.status(200).json(mediaList);
+});
+
+// Rota para listar todos os childIds disponíveis
+app.get('/get-child-ids', (req, res) => {
+    const uploadDir = 'uploads/';
+    try {
+        const files = fs.readdirSync(uploadDir);
+        // Extrair childIds únicos dos nomes dos arquivos
+        const childIds = [...new Set(files.map(file => {
+            const parts = file.split('-');
+            return parts[1]; // Pega o childId (segundo elemento após o timestamp)
+        }))].filter(childId => childId !== 'unknown'); // Remove 'unknown' se não houver childId
+        res.status(200).json(childIds);
+    } catch (error) {
+        console.error('Erro ao listar childIds:', error);
+        res.status(500).json({ message: 'Erro ao listar childIds' });
+    }
 });
 
 app.use('/uploads', express.static('uploads'));
