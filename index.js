@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000; // Usa a porta do Render ou 3000 como fallback local
 
 // Middleware
 app.use(cors());
@@ -84,7 +84,7 @@ app.get('/get-child-ids', (req, res) => {
 
 app.use('/uploads', express.static('uploads'));
 
-// Iniciar o servidor
+// Iniciar o servidor na porta fornecida pelo Render
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
 });
