@@ -12,11 +12,19 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// Middleware para capturar erros de rota não encontrada
+app.use((req, res, next) => {
+    console.log(`Requisição recebida: ${req.method} ${req.url}`);
+    next();
+});
+
+// Rota padrão
 app.get('/', (req, res) => {
-    console.log('Requisição GET / recebida'); // Log para depuração
+    console.log('Requisição GET / recebida');
     res.status(200).send('Servidor Parental Monitor rodando!');
 });
 
+// Configuração de upload
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const uploadDir = 'uploads/';
@@ -74,6 +82,12 @@ app.get('/get-child-ids', (req, res) => {
 });
 
 app.use('/uploads', express.static('uploads'));
+
+// Middleware para capturar erros 404
+app.use((req, res) => {
+    console.log(`Rota não encontrada: ${req.method} ${req.url}`);
+    res.status(404).send('Rota não encontrada');
+});
 
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
