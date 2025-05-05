@@ -13,6 +13,7 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => {
+    console.log('Requisição GET / recebida'); // Log para depuração
     res.status(200).send('Servidor Parental Monitor rodando!');
 });
 
