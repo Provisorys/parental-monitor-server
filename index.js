@@ -37,7 +37,9 @@ const storage = multer.diskStorage({
         const timestamp = Date.now();
         const childId = req.body.childId || 'unknown';
         const type = req.body.type || 'unknown';
-        cb(null, `${type}-${childId}-${timestamp}-${file.originalname}`);
+        const ext = path.extname(file.originalname).toLowerCase();
+        const mediaType = ext === '.jpg' || ext === '.png' ? 'image' : ext === '.mp4' ? 'video' : 'audio';
+        cb(null, `${mediaType}-${childId}-${timestamp}${ext}`);
     }
 });
 const upload = multer({ storage: storage });
@@ -57,14 +59,14 @@ app.post('/notifications', (req, res) => {
     }
     const fileName = `text-${childId}-${timestamp}.txt`;
     const filePath = path.join(uploadDir, fileName);
-    const content = JSON.stringify({ title, text, type });
+    const content = JSON.stringify({ title, text, type: type || 'text' });
     try {
         fs.writeFileSync(filePath, content);
         console.log(`Notificação salva em: ${filePath}`);
         res.status(200).json({ message: 'Notificação recebida e salva com sucesso' });
     } catch (error) {
-        console.error(`Erro ao salvar notificação: ${error}`);
-        res.status(500).json({ message: 'Erro ao salvar notificação' });
+        console.error(`Erro ao salvar notificação: ${error.message}`);
+        res.status(500).json({ message: 'Erro ao salvar notificação', error: error.message });
     }
 });
 
@@ -76,7 +78,7 @@ app.post('/media', upload.single('file'), (req, res) => {
         console.log('Erro: Arquivo não foi enviado');
         return res.status(400).json({ message: 'Arquivo é obrigatório' });
     }
-    res.status(200).json({ message: 'Mídia recebida com sucesso', filePath: filePath });
+    res.status(200).json({ message: 'Mídia recebida com sucesso', filePath });
 });
 
 app.get('/get-conversations/:childId', (req, res) => {
@@ -91,40 +93,53 @@ app.get('/get-conversations/:childId', (req, res) => {
         const files = fs.readdirSync(uploadDir).filter(file => file.includes(childId));
         console.log(`Arquivos encontrados para ${childId}:`, files);
 
-        files.forEach(file => {
+        for (const file of files) {
             try {
                 const parts = file.split('-');
                 if (parts.length < 3) {
                     console.log(`Arquivo com formato inválido: ${file}, ignorando`);
-                    return;
+                    continue;
                 }
                 const type = parts[0];
+                const fileChildId = parts[1];
                 const timestamp = parts[2].split('.')[0];
+                if (fileChildId !== childId) {
+                    console.log(`Arquivo ${file} não pertence a childId ${childId}, ignorando`);
+                    continue;
+                }
                 if (type === 'text') {
                     const content = fs.readFileSync(path.join(uploadDir, file), 'utf-8');
-                    const parsedContent = JSON.parse(content);
+                    let parsedContent;
+                    try {
+                        parsedContent = JSON.parse(content);
+                    } catch (parseError) {
+                        console.error(`Erro ao parsear JSON do arquivo ${file}: ${parseError.message}`);
+                        continue;
+                    }
                     conversations.push({
                         type: parsedContent.type || 'text',
                         timestamp: timestamp,
-                        title: parsedContent.title || '',
+                        title: parsedContent.title || 'Sem título',
                         text: parsedContent.text || ''
                     });
-                } else {
+                } else if (['image', 'video', 'audio'].includes(type)) {
                     conversations.push({
+                        type: type,
                         filePath: `/${uploadDir}${file}`,
-                        timestamp: timestamp,
-                        type: type
+                        timestamp: timestamp
                     });
+                } else {
+                    console.log(`Tipo de arquivo desconhecido: ${type}, arquivo: ${file}, ignorando`);
                 }
             } catch (error) {
-                console.error(`Erro ao processar arquivo ${file}: ${error}`);
+                console.error(`Erro ao processar arquivo ${file}: ${error.message}`);
             }
-        });
+        }
         console.log(`Conversas retornadas para ${childId}:`, conversations);
         res.status(200).json(conversations);
     } catch (error) {
-        console.error(`Erro ao processar get-conversations/${childId}: ${error}`);
-        res.status(500).json({ message: 'Erro ao buscar conversas' });
+        console.error(`Erro ao processar get-conversations/${childId}: ${error.message}`);
+        res.status(500).json({ message: 'Erro ao buscar conversas', error: error.message });
     }
 });
 
@@ -139,13 +154,13 @@ app.get('/get-child-ids', (req, res) => {
         console.log(`Arquivos encontrados:`, files);
         const childIds = [...new Set(files.map(file => {
             const parts = file.split('-');
-            return parts[1];
+            return parts[1] || 'unknown';
         }))].filter(childId => childId !== 'unknown');
         console.log(`childIds retornados:`, childIds);
         res.status(200).json(childIds);
     } catch (error) {
-        console.error(`Erro ao listar childIds: ${error}`);
-        res.status(500).json({ message: 'Erro ao listar childIds' });
+        console.error(`Erro ao listar childIds: ${error.message}`);
+        res.status(500).json({ message: 'Erro ao listar childIds', error: error.message });
     }
 });
 
