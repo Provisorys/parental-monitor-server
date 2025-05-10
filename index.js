@@ -45,11 +45,17 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 app.post('/notifications', (req, res) => {
-    const { childId, title, text, timestamp, type } = req.body;
-    console.log(`Notificação recebida - childId: ${childId}, title: ${title}, text: ${text}, timestamp: ${timestamp}, type: ${type}`);
+    const { childId, title, text, timestamp, type, direction } = req.body; // Adiciona direction
+    console.log(`Notificação recebida - childId: ${childId}, title: ${title}, text: ${text}, timestamp: ${timestamp}, type: ${type}, direction: ${direction}`);
+    
+    // Validação
     if (!childId || !text || !timestamp) {
         console.log('Erro: childId, text ou timestamp ausentes');
         return res.status(400).json({ message: 'childId, text e timestamp são obrigatórios' });
+    }
+    if (!direction || !['sent', 'received'].includes(direction)) {
+        console.log('Erro: direction inválido ou ausente');
+        return res.status(400).json({ message: 'direction é obrigatório e deve ser "sent" ou "received"' });
     }
 
     // Salvar a notificação como um arquivo de texto
@@ -59,7 +65,7 @@ app.post('/notifications', (req, res) => {
     }
     const fileName = `text-${childId}-${timestamp}.txt`;
     const filePath = path.join(uploadDir, fileName);
-    const content = JSON.stringify({ title, text, type: type || 'text' });
+    const content = JSON.stringify({ title, text, type: type || 'text', direction }); // Inclui direction
     try {
         fs.writeFileSync(filePath, content);
         console.log(`Notificação salva em: ${filePath}`);
@@ -71,13 +77,30 @@ app.post('/notifications', (req, res) => {
 });
 
 app.post('/media', upload.single('file'), (req, res) => {
-    const { childId, type, timestamp } = req.body;
+    const { childId, type, timestamp, direction } = req.body; // Adiciona direction
     const filePath = req.file ? req.file.path : null;
-    console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, filePath: ${filePath}`);
+    console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, direction: ${direction}, filePath: ${filePath}`);
+    
     if (!filePath) {
         console.log('Erro: Arquivo não foi enviado');
         return res.status(400).json({ message: 'Arquivo é obrigatório' });
     }
+    if (!direction || !['sent', 'received'].includes(direction)) {
+        console.log('Erro: direction inválido ou ausente');
+        return res.status(400).json({ message: 'direction é obrigatório e deve ser "sent" ou "received"' });
+    }
+
+    // Opcional: Salvar direction em um arquivo de metadados associado à mídia
+    const metaFileName = `meta-${childId}-${timestamp}.json`;
+    const metaFilePath = path.join('uploads/', metaFileName);
+    const metaContent = JSON.stringify({ direction });
+    try {
+        fs.writeFileSync(metaFilePath, metaContent);
+        console.log(`Metadados salvos em: ${metaFilePath}`);
+    } catch (error) {
+        console.error(`Erro ao salvar metadados: ${error.message}`);
+    }
+
     res.status(200).json({ message: 'Mídia recebida com sucesso', filePath });
 });
 
@@ -120,13 +143,23 @@ app.get('/get-conversations/:childId', (req, res) => {
                         type: parsedContent.type || 'text',
                         timestamp: timestamp,
                         title: parsedContent.title || 'Sem título',
-                        text: parsedContent.text || ''
+                        text: parsedContent.text || '',
+                        direction: parsedContent.direction || 'received' // Inclui direction
                     });
                 } else if (['image', 'video', 'audio'].includes(type)) {
+                    // Busca metadados associados à mídia
+                    const metaFile = `meta-${childId}-${timestamp}.json`;
+                    let direction = 'received'; // Padrão
+                    if (fs.existsSync(path.join(uploadDir, metaFile))) {
+                        const metaContent = fs.readFileSync(path.join(uploadDir, metaFile), 'utf-8');
+                        const parsedMeta = JSON.parse(metaContent);
+                        direction = parsedMeta.direction || 'received';
+                    }
                     conversations.push({
                         type: type,
                         filePath: `/${uploadDir}${file}`,
-                        timestamp: timestamp
+                        timestamp: timestamp,
+                        direction: direction // Inclui direction
                     });
                 } else {
                     console.log(`Tipo de arquivo desconhecido: ${type}, arquivo: ${file}, ignorando`);
