@@ -45,7 +45,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 app.post('/notifications', (req, res) => {
-    const { childId, title, text, timestamp, type, direction } = req.body; // Adiciona direction
+    const { childId, title, text, timestamp, type, direction } = req.body;
     console.log(`Notificação recebida - childId: ${childId}, title: ${title}, text: ${text}, timestamp: ${timestamp}, type: ${type}, direction: ${direction}`);
     
     // Validação
@@ -65,7 +65,7 @@ app.post('/notifications', (req, res) => {
     }
     const fileName = `text-${childId}-${timestamp}.txt`;
     const filePath = path.join(uploadDir, fileName);
-    const content = JSON.stringify({ title, text, type: type || 'text', direction }); // Inclui direction
+    const content = JSON.stringify({ title, text, type: type || 'text', direction });
     try {
         fs.writeFileSync(filePath, content);
         console.log(`Notificação salva em: ${filePath}`);
@@ -77,7 +77,7 @@ app.post('/notifications', (req, res) => {
 });
 
 app.post('/media', upload.single('file'), (req, res) => {
-    const { childId, type, timestamp, direction } = req.body; // Adiciona direction
+    const { childId, type, timestamp, direction } = req.body;
     const filePath = req.file ? req.file.path : null;
     console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, direction: ${direction}, filePath: ${filePath}`);
     
@@ -140,26 +140,27 @@ app.get('/get-conversations/:childId', (req, res) => {
                         continue;
                     }
                     conversations.push({
+                        childId: fileChildId,
                         type: parsedContent.type || 'text',
                         timestamp: timestamp,
                         title: parsedContent.title || 'Sem título',
                         text: parsedContent.text || '',
-                        direction: parsedContent.direction || 'received' // Inclui direction
+                        direction: parsedContent.direction || 'received'
                     });
                 } else if (['image', 'video', 'audio'].includes(type)) {
-                    // Busca metadados associados à mídia
                     const metaFile = `meta-${childId}-${timestamp}.json`;
-                    let direction = 'received'; // Padrão
+                    let direction = 'received';
                     if (fs.existsSync(path.join(uploadDir, metaFile))) {
                         const metaContent = fs.readFileSync(path.join(uploadDir, metaFile), 'utf-8');
                         const parsedMeta = JSON.parse(metaContent);
                         direction = parsedMeta.direction || 'received';
                     }
                     conversations.push({
+                        childId: fileChildId,
                         type: type,
                         filePath: `/${uploadDir}${file}`,
                         timestamp: timestamp,
-                        direction: direction // Inclui direction
+                        direction: direction
                     });
                 } else {
                     console.log(`Tipo de arquivo desconhecido: ${type}, arquivo: ${file}, ignorando`);
@@ -194,6 +195,47 @@ app.get('/get-child-ids', (req, res) => {
     } catch (error) {
         console.error(`Erro ao listar childIds: ${error.message}`);
         res.status(500).json({ message: 'Erro ao listar childIds', error: error.message });
+    }
+});
+
+app.post('/rename-child-id/:oldChildId/:newChildId', (req, res) => {
+    const { oldChildId, newChildId } = req.params;
+    const uploadDir = 'uploads/';
+    try {
+        if (!fs.existsSync(uploadDir)) {
+            console.log(`Pasta ${uploadDir} não existe`);
+            return res.status(404).json({ message: 'Nenhum dado encontrado para renomear' });
+        }
+
+        const files = fs.readdirSync(uploadDir).filter(file => file.includes(oldChildId));
+        console.log(`Arquivos encontrados para ${oldChildId}:`, files);
+
+        for (const file of files) {
+            const parts = file.split('-');
+            if (parts.length < 3) {
+                console.log(`Arquivo com formato inválido: ${file}, ignorando`);
+                continue;
+            }
+            const type = parts[0];
+            const fileChildId = parts[1];
+            const timestamp = parts[2].split('.')[0];
+            if (fileChildId !== oldChildId) {
+                console.log(`Arquivo ${file} não pertence a childId ${oldChildId}, ignorando`);
+                continue;
+            }
+
+            const oldFilePath = path.join(uploadDir, file);
+            const newFileName = file.replace(`${type}-${oldChildId}`, `${type}-${newChildId}`);
+            const newFilePath = path.join(uploadDir, newFileName);
+
+            fs.renameSync(oldFilePath, newFilePath);
+            console.log(`Arquivo renomeado de ${file} para ${newFileName}`);
+        }
+
+        res.status(200).json({ message: `childId renomeado de ${oldChildId} para ${newChildId}` });
+    } catch (error) {
+        console.error(`Erro ao renomear childId de ${oldChildId} para ${newChildId}: ${error.message}`);
+        res.status(500).json({ message: 'Erro ao renomear childId', error: error.message });
     }
 });
 
