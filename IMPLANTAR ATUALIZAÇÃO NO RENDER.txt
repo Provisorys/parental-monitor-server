@@ -1,0 +1,3 @@
+git add .
+git commit -m "Atualização para registrar mensagens enviadas e recebidas"
+git push origin main
