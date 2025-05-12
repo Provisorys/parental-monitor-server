@@ -45,23 +45,24 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 app.post('/notifications', (req, res) => {
-    const { childId, message, timestamp, messageType, direction } = req.body;
-    console.log(`Notificação recebida - childId: ${childId}, message: ${message}, timestamp: ${timestamp}, type: ${messageType}, direction: ${direction}`);
+    const { childId, message, messageType } = req.body;
+    const timestamp = Date.now().toString();
+    console.log(`Notificação recebida - childId: ${childId}, message: ${message}, timestamp: ${timestamp}, type: ${messageType}`);
 
     // Validação básica
-    if (!childId || !message || !timestamp) {
-        console.log('Erro: childId, message ou timestamp ausentes');
-        return res.status(400).json({ message: 'childId, message e timestamp são obrigatórios' });
+    if (!childId || !message) {
+        console.log('Erro: childId ou message ausentes');
+        return res.status(400).json({ message: 'childId e message são obrigatórios' });
     }
 
-    // Salvar a notificação como um arquivo de texto, incluindo o messageType
+    // Salvar a notificação como um arquivo de texto
     const uploadDir = 'uploads/';
     if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir);
     }
-    const fileName = `${messageType || 'generic'}-${childId}-${timestamp}.txt`;
+    const fileName = `${messageType || 'text'}-${childId}-${timestamp}.txt`;
     const filePath = path.join(uploadDir, fileName);
-    const content = JSON.stringify({ message, type: messageType || 'generic', direction: direction || 'unknown' });
+    const content = JSON.stringify({ message, type: messageType || 'text', direction: messageType === "SENT" ? "sent" : "received" });
     try {
         fs.writeFileSync(filePath, content);
         console.log(`Notificação salva em: ${filePath}`);
@@ -126,7 +127,7 @@ app.get('/get-conversations/:childId', (req, res) => {
                     console.log(`Arquivo ${file} não pertence a childId ${childId}, ignorando`);
                     continue;
                 }
-                if (['text', 'LOCATION'].includes(type)) {
+                if (['text', 'LOCATION', 'SENT', 'RECEIVED', 'IMAGE', 'AUDIO'].includes(type.toUpperCase())) {
                     const content = fs.readFileSync(path.join(uploadDir, file), 'utf-8');
                     let parsedContent;
                     try {
