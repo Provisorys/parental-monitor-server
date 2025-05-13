@@ -272,7 +272,7 @@ app.use((req, res) => {
     res.status(404).send('Rota não encontrada');
 });
 
-app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+app.listen(PORT || 10000, '0.0.0.0', () => {
+    console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`); // Log para depurar a porta
 });
