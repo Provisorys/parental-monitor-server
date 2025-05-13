@@ -45,9 +45,9 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 app.post('/notifications', (req, res) => {
-    const { childId, message, messageType } = req.body;
-    const timestamp = Date.now().toString();
-    console.log(`Notificação recebida - childId: ${childId}, message: ${message}, timestamp: ${timestamp}, type: ${messageType}`);
+    const { childId, message, messageType, timestamp, contactOrGroup, direction } = req.body;
+    const timestampValue = timestamp || Date.now().toString();
+    console.log(`Notificação recebida - childId: ${childId}, message: ${message}, timestamp: ${timestampValue}, type: ${messageType}, contactOrGroup: ${contactOrGroup}, direction: ${direction}`);
 
     // Validação básica
     if (!childId || !message) {
@@ -55,14 +55,17 @@ app.post('/notifications', (req, res) => {
         return res.status(400).json({ message: 'childId e message são obrigatórios' });
     }
 
+    // Determinar o direction se não for fornecido
+    const messageDirection = direction || (messageType === "SENT" ? "sent" : "received");
+
     // Salvar a notificação como um arquivo de texto
     const uploadDir = 'uploads/';
     if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir);
     }
-    const fileName = `${messageType || 'text'}-${childId}-${timestamp}.txt`;
+    const fileName = `${messageType || 'text'}-${childId}-${timestampValue}.txt`;
     const filePath = path.join(uploadDir, fileName);
-    const content = JSON.stringify({ message, type: messageType || 'text', direction: messageType === "SENT" ? "sent" : "received" });
+    const content = JSON.stringify({ message, type: messageType || 'text', direction: messageDirection, contactOrGroup });
     try {
         fs.writeFileSync(filePath, content);
         console.log(`Notificação salva em: ${filePath}`);
@@ -74,9 +77,9 @@ app.post('/notifications', (req, res) => {
 });
 
 app.post('/media', upload.single('file'), (req, res) => {
-    const { childId, type, timestamp, direction } = req.body;
+    const { childId, type, timestamp, direction, contactOrGroup } = req.body;
     const filePath = req.file ? req.file.path : null;
-    console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, direction: ${direction}, filePath: ${filePath}`);
+    console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, direction: ${direction}, contactOrGroup: ${contactOrGroup}, filePath: ${filePath}`);
 
     if (!filePath) {
         console.log('Erro: Arquivo não foi enviado');
@@ -87,10 +90,10 @@ app.post('/media', upload.single('file'), (req, res) => {
         return res.status(400).json({ message: 'direction é obrigatório e deve ser "sent" ou "received"' });
     }
 
-    // Opcional: Salvar direction em um arquivo de metadados associado à mídia
+    // Opcional: Salvar direction e contactOrGroup em um arquivo de metadados associado à mídia
     const metaFileName = `meta-${childId}-${timestamp}.json`;
     const metaFilePath = path.join('uploads/', metaFileName);
-    const metaContent = JSON.stringify({ direction });
+    const metaContent = JSON.stringify({ direction, contactOrGroup });
     try {
         fs.writeFileSync(metaFilePath, metaContent);
         console.log(`Metadados salvos em: ${metaFilePath}`);
@@ -127,7 +130,7 @@ app.get('/get-conversations/:childId', (req, res) => {
                     console.log(`Arquivo ${file} não pertence a childId ${childId}, ignorando`);
                     continue;
                 }
-                if (['text', 'LOCATION', 'SENT', 'RECEIVED', 'IMAGE', 'AUDIO'].includes(type.toUpperCase())) {
+                if (['text', 'LOCATION', 'SENT', 'RECEIVED', 'IMAGE', 'AUDIO', 'WHATSAPP_MESSAGE'].includes(type.toUpperCase())) {
                     const content = fs.readFileSync(path.join(uploadDir, file), 'utf-8');
                     let parsedContent;
                     try {
@@ -141,22 +144,26 @@ app.get('/get-conversations/:childId', (req, res) => {
                         type: parsedContent.type || 'text',
                         timestamp: timestamp,
                         message: parsedContent.message || parsedContent.text || '',
-                        direction: parsedContent.direction || 'unknown'
+                        direction: parsedContent.direction || 'unknown',
+                        contactOrGroup: parsedContent.contactOrGroup || 'unknown'
                     });
                 } else if (['image', 'video', 'audio'].includes(type)) {
                     const metaFile = `meta-${childId}-${timestamp}.json`;
                     let direction = 'received';
+                    let contactOrGroup = 'unknown';
                     if (fs.existsSync(path.join(uploadDir, metaFile))) {
                         const metaContent = fs.readFileSync(path.join(uploadDir, metaFile), 'utf-8');
                         const parsedMeta = JSON.parse(metaContent);
                         direction = parsedMeta.direction || 'received';
+                        contactOrGroup = parsedMeta.contactOrGroup || 'unknown';
                     }
                     conversations.push({
                         childId: fileChildId,
                         type: type,
                         filePath: `/${uploadDir}${file}`,
                         timestamp: timestamp,
-                        direction: direction
+                        direction: direction,
+                        contactOrGroup: contactOrGroup
                     });
                 } else {
                     console.log(`Tipo de arquivo desconhecido: ${type}, arquivo: ${file}, ignorando`);
@@ -165,8 +172,19 @@ app.get('/get-conversations/:childId', (req, res) => {
                 console.error(`Erro ao processar arquivo ${file}: ${error.message}`);
             }
         }
-        console.log(`Conversas retornadas para ${childId}:`, conversations);
-        res.status(200).json(conversations);
+
+        // Agrupar por contactOrGroup
+        const groupedConversations = {};
+        conversations.forEach(conversation => {
+            const group = conversation.contactOrGroup || 'unknown';
+            if (!groupedConversations[group]) {
+                groupedConversations[group] = [];
+            }
+            groupedConversations[group].push(conversation);
+        });
+
+        console.log(`Conversas agrupadas retornadas para ${childId}:`, groupedConversations);
+        res.status(200).json(groupedConversations);
     } catch (error) {
         console.error(`Erro ao processar get-conversations/${childId}: ${error.message}`);
         res.status(500).json({ message: 'Erro ao buscar conversas', error: error.message });
