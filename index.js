@@ -56,7 +56,10 @@ app.post('/notifications', (req, res) => {
     }
 
     // Determinar o direction se não for fornecido
-    const messageDirection = direction || (messageType === "SENT" ? "sent" : "received");
+    const messageDirection = direction || (messageType === "SENT" ? "sent" : messageType === "RECEIVED" ? "received" : "unknown");
+
+    // Garantir que contactOrGroup tenha um valor padrão
+    const contactOrGroupValue = contactOrGroup || 'unknown';
 
     // Salvar a notificação como um arquivo de texto
     const uploadDir = 'uploads/';
@@ -65,7 +68,12 @@ app.post('/notifications', (req, res) => {
     }
     const fileName = `${messageType || 'text'}-${childId}-${timestampValue}.txt`;
     const filePath = path.join(uploadDir, fileName);
-    const content = JSON.stringify({ message, type: messageType || 'text', direction: messageDirection, contactOrGroup });
+    const content = JSON.stringify({
+        message,
+        type: messageType || 'text',
+        direction: messageDirection,
+        contactOrGroup: contactOrGroupValue
+    });
     try {
         fs.writeFileSync(filePath, content);
         console.log(`Notificação salva em: ${filePath}`);
@@ -90,10 +98,13 @@ app.post('/media', upload.single('file'), (req, res) => {
         return res.status(400).json({ message: 'direction é obrigatório e deve ser "sent" ou "received"' });
     }
 
+    // Garantir que contactOrGroup tenha um valor padrão
+    const contactOrGroupValue = contactOrGroup || 'unknown';
+
     // Opcional: Salvar direction e contactOrGroup em um arquivo de metadados associado à mídia
     const metaFileName = `meta-${childId}-${timestamp}.json`;
     const metaFilePath = path.join('uploads/', metaFileName);
-    const metaContent = JSON.stringify({ direction, contactOrGroup });
+    const metaContent = JSON.stringify({ direction, contactOrGroup: contactOrGroupValue });
     try {
         fs.writeFileSync(metaFilePath, metaContent);
         console.log(`Metadados salvos em: ${metaFilePath}`);
