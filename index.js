@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT; // Remove o || 3000 para forçar o uso da porta do Render
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -274,4 +274,5 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
+    console.log(`PORTA AMBIENTE: ${process.env.PORT}`); // Log para depurar a porta
 });
