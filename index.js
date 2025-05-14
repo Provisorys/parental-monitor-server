@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     res.status(200).send('Servidor Parental Monitor rodando!');
 });
 
-// Configuração de upload
+// Configuração de upload para arquivos de mídia
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const uploadDir = 'uploads/';
@@ -44,6 +44,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
+// Rota para receber notificações (mensagens de texto)
 app.post('/notifications', (req, res) => {
     const { childId, message, messageType, timestamp, contactOrGroup, direction } = req.body;
     const timestampValue = timestamp || Date.now().toString();
@@ -66,13 +67,14 @@ app.post('/notifications', (req, res) => {
     if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir);
     }
-    const fileName = `${messageType || 'text'}-${childId}-${timestampValue}.txt`;
+    const fileName = `text-${childId}-${timestampValue}.json`; // Salvar como JSON para facilitar a leitura
     const filePath = path.join(uploadDir, fileName);
     const content = JSON.stringify({
         message,
-        type: messageType || 'text',
+        type: 'text', // Forçar o tipo para 'text' já que esta rota é para mensagens de texto
         direction: messageDirection,
-        contactOrGroup: contactOrGroupValue
+        contactOrGroup: contactOrGroupValue,
+        timestamp: timestampValue // Incluir o timestamp no arquivo
     });
     try {
         fs.writeFileSync(filePath, content);
@@ -84,6 +86,7 @@ app.post('/notifications', (req, res) => {
     }
 });
 
+// Rota para receber arquivos de mídia
 app.post('/media', upload.single('file'), (req, res) => {
     const { childId, type, timestamp, direction, contactOrGroup } = req.body;
     const filePath = req.file ? req.file.path : null;
@@ -100,11 +103,12 @@ app.post('/media', upload.single('file'), (req, res) => {
 
     // Garantir que contactOrGroup tenha um valor padrão
     const contactOrGroupValue = contactOrGroup || 'unknown';
+    const timestampValue = timestamp || Date.now().toString();
 
-    // Opcional: Salvar direction e contactOrGroup em um arquivo de metadados associado à mídia
-    const metaFileName = `meta-${childId}-${timestamp}.json`;
+    // Salvar metadados em um arquivo JSON separado
+    const metaFileName = `meta-${childId}-${timestampValue}-${path.basename(filePath)}.json`;
     const metaFilePath = path.join('uploads/', metaFileName);
-    const metaContent = JSON.stringify({ direction, contactOrGroup: contactOrGroupValue });
+    const metaContent = JSON.stringify({ direction, contactOrGroup: contactOrGroupValue, type: type });
     try {
         fs.writeFileSync(metaFilePath, metaContent);
         console.log(`Metadados salvos em: ${metaFilePath}`);
@@ -115,6 +119,7 @@ app.post('/media', upload.single('file'), (req, res) => {
     res.status(200).json({ message: 'Mídia recebida com sucesso', filePath });
 });
 
+// Rota para buscar as conversas de um determinado childId
 app.get('/get-conversations/:childId', (req, res) => {
     const { childId } = req.params;
     const uploadDir = 'uploads/';
@@ -136,42 +141,49 @@ app.get('/get-conversations/:childId', (req, res) => {
                 }
                 const type = parts[0];
                 const fileChildId = parts[1];
-                const timestamp = parts[2].split('.')[0];
+                const timestampWithExt = parts.slice(2).join('-');
+                const timestamp = timestampWithExt.split('.')[0];
+                const ext = path.extname(file);
+
                 if (fileChildId !== childId) {
                     console.log(`Arquivo ${file} não pertence a childId ${childId}, ignorando`);
                     continue;
                 }
-                if (['text', 'LOCATION', 'SENT', 'RECEIVED', 'IMAGE', 'AUDIO', 'WHATSAPP_MESSAGE'].includes(type.toUpperCase())) {
+
+                if (type === 'text') {
                     const content = fs.readFileSync(path.join(uploadDir, file), 'utf-8');
-                    let parsedContent;
                     try {
-                        parsedContent = JSON.parse(content);
+                        const parsedContent = JSON.parse(content);
+                        conversations.push({
+                            childId: fileChildId,
+                            type: parsedContent.type || 'text',
+                            timestamp: parsedContent.timestamp,
+                            message: parsedContent.message || '',
+                            direction: parsedContent.direction || 'unknown',
+                            contactOrGroup: parsedContent.contactOrGroup || 'unknown'
+                        });
                     } catch (parseError) {
                         console.error(`Erro ao parsear JSON do arquivo ${file}: ${parseError.message}`);
-                        continue;
                     }
-                    conversations.push({
-                        childId: fileChildId,
-                        type: parsedContent.type || 'text',
-                        timestamp: timestamp,
-                        message: parsedContent.message || parsedContent.text || '',
-                        direction: parsedContent.direction || 'unknown',
-                        contactOrGroup: parsedContent.contactOrGroup || 'unknown'
-                    });
                 } else if (['image', 'video', 'audio'].includes(type)) {
-                    const metaFile = `meta-${childId}-${timestamp}.json`;
+                    const baseFileName = file.split('.')[0];
+                    const metaFile = `meta-${childId}-${baseFileName.split('-').slice(2).join('-')}.json`;
                     let direction = 'received';
                     let contactOrGroup = 'unknown';
                     if (fs.existsSync(path.join(uploadDir, metaFile))) {
                         const metaContent = fs.readFileSync(path.join(uploadDir, metaFile), 'utf-8');
-                        const parsedMeta = JSON.parse(metaContent);
-                        direction = parsedMeta.direction || 'received';
-                        contactOrGroup = parsedMeta.contactOrGroup || 'unknown';
+                        try {
+                            const parsedMeta = JSON.parse(metaContent);
+                            direction = parsedMeta.direction || 'received';
+                            contactOrGroup = parsedMeta.contactOrGroup || 'unknown';
+                        } catch (parseError) {
+                            console.error(`Erro ao parsear metadados ${metaFile}: ${parseError.message}`);
+                        }
                     }
                     conversations.push({
                         childId: fileChildId,
                         type: type,
-                        filePath: `/${uploadDir}${file}`,
+                        filePath: `/uploads/${file}`,
                         timestamp: timestamp,
                         direction: direction,
                         contactOrGroup: contactOrGroup
@@ -184,8 +196,9 @@ app.get('/get-conversations/:childId', (req, res) => {
             }
         }
 
-        // Agrupar por contactOrGroup
+        // Agrupar por contactOrGroup e ordenar por timestamp dentro de cada grupo
         const groupedConversations = {};
+        conversations.sort((a, b) => parseInt(a.timestamp) - parseInt(b.timestamp)); // Ordenar por timestamp
         conversations.forEach(conversation => {
             const group = conversation.contactOrGroup || 'unknown';
             if (!groupedConversations[group]) {
@@ -243,18 +256,24 @@ app.post('/rename-child-id/:oldChildId/:newChildId', (req, res) => {
             }
             const type = parts[0];
             const fileChildId = parts[1];
-            const timestamp = parts[2].split('.')[0];
-            if (fileChildId !== oldChildId) {
-                console.log(`Arquivo ${file} não pertence a childId ${oldChildId}, ignorando`);
-                continue;
-            }
-
-            const oldFilePath = path.join(uploadDir, file);
+            const timestampWithExt = parts.slice(2).join('-');
             const newFileName = file.replace(`${type}-${oldChildId}`, `${type}-${newChildId}`);
+            const oldFilePath = path.join(uploadDir, file);
             const newFilePath = path.join(uploadDir, newFileName);
 
             fs.renameSync(oldFilePath, newFilePath);
             console.log(`Arquivo renomeado de ${file} para ${newFileName}`);
+
+            // Renomear o arquivo de metadados associado, se existir
+            if (['image', 'video', 'audio'].includes(type)) {
+                const baseOldName = file.split('.')[0].replace(`${type}-${oldChildId}-`, '');
+                const oldMetaFile = path.join(uploadDir, `meta-${oldChildId}-${baseOldName}.json`);
+                const newMetaFile = path.join(uploadDir, `meta-${newChildId}-${baseOldName}.json`);
+                if (fs.existsSync(oldMetaFile)) {
+                    fs.renameSync(oldMetaFile, newMetaFile);
+                    console.log(`Arquivo de metadados renomeado de meta-${oldChildId}-${baseOldName}.json para meta-${newChildId}-${baseOldName}.json`);
+                }
+            }
         }
 
         res.status(200).json({ message: `childId renomeado de ${oldChildId} para ${newChildId}` });
