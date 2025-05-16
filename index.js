@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT; // Remove o || 3000 para forçar o uso da porta do Render
+const PORT = process.env.PORT;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -46,9 +46,9 @@ const upload = multer({ storage: storage });
 
 // Rota para receber notificações (mensagens de texto)
 app.post('/notifications', (req, res) => {
-    const { childId, message, messageType, timestamp, contactOrGroup, direction } = req.body;
+    const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber } = req.body;
     const timestampValue = timestamp || Date.now().toString();
-    console.log(`Notificação recebida - childId: ${childId}, message: ${message}, timestamp: ${timestampValue}, type: ${messageType}, contactOrGroup: ${contactOrGroup}, direction: ${direction}`);
+    console.log(`Notificação recebida - childId: ${childId}, message: ${message}, timestamp: ${timestampValue}, type: ${messageType}, contactOrGroup: ${contactOrGroup}, direction: ${direction}, phoneNumber: ${phoneNumber}`);
 
     // Validação básica
     if (!childId || !message) {
@@ -56,25 +56,23 @@ app.post('/notifications', (req, res) => {
         return res.status(400).json({ message: 'childId e message são obrigatórios' });
     }
 
-    // Determinar o direction se não for fornecido
     const messageDirection = direction || (messageType === "SENT" ? "sent" : messageType === "RECEIVED" ? "received" : "unknown");
-
-    // Garantir que contactOrGroup tenha um valor padrão
     const contactOrGroupValue = contactOrGroup || 'unknown';
+    const phoneNumberValue = phoneNumber || 'unknown_number';
 
-    // Salvar a notificação como um arquivo de texto
     const uploadDir = 'uploads/';
     if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir);
     }
-    const fileName = `text-${childId}-${timestampValue}.json`; // Salvar como JSON para facilitar a leitura
+    const fileName = `text-${childId}-${timestampValue}.json`;
     const filePath = path.join(uploadDir, fileName);
     const content = JSON.stringify({
         message,
-        type: 'text', // Forçar o tipo para 'text' já que esta rota é para mensagens de texto
+        type: 'text',
         direction: messageDirection,
         contactOrGroup: contactOrGroupValue,
-        timestamp: timestampValue // Incluir o timestamp no arquivo
+        phoneNumber: phoneNumberValue,
+        timestamp: timestampValue
     });
     try {
         fs.writeFileSync(filePath, content);
@@ -88,9 +86,9 @@ app.post('/notifications', (req, res) => {
 
 // Rota para receber arquivos de mídia
 app.post('/media', upload.single('file'), (req, res) => {
-    const { childId, type, timestamp, direction, contactOrGroup } = req.body;
+    const { childId, type, timestamp, direction, contactOrGroup, phoneNumber } = req.body;
     const filePath = req.file ? req.file.path : null;
-    console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, direction: ${direction}, contactOrGroup: ${contactOrGroup}, filePath: ${filePath}`);
+    console.log(`Mídia recebida - childId: ${childId}, type: ${type}, timestamp: ${timestamp}, direction: ${direction}, contactOrGroup: ${contactOrGroup}, phoneNumber: ${phoneNumber}, filePath: ${filePath}`);
 
     if (!filePath) {
         console.log('Erro: Arquivo não foi enviado');
@@ -101,14 +99,13 @@ app.post('/media', upload.single('file'), (req, res) => {
         return res.status(400).json({ message: 'direction é obrigatório e deve ser "sent" ou "received"' });
     }
 
-    // Garantir que contactOrGroup tenha um valor padrão
     const contactOrGroupValue = contactOrGroup || 'unknown';
+    const phoneNumberValue = phoneNumber || 'unknown_number';
     const timestampValue = timestamp || Date.now().toString();
 
-    // Salvar metadados em um arquivo JSON separado
     const metaFileName = `meta-${childId}-${timestampValue}-${path.basename(filePath)}.json`;
     const metaFilePath = path.join('uploads/', metaFileName);
-    const metaContent = JSON.stringify({ direction, contactOrGroup: contactOrGroupValue, type: type });
+    const metaContent = JSON.stringify({ direction, contactOrGroup: contactOrGroupValue, phoneNumber: phoneNumberValue, type });
     try {
         fs.writeFileSync(metaFilePath, metaContent);
         console.log(`Metadados salvos em: ${metaFilePath}`);
@@ -129,11 +126,12 @@ app.get('/get-conversations/:childId', (req, res) => {
             console.log(`Pasta ${uploadDir} não existe, retornando lista vazia`);
             return res.status(200).json([]);
         }
-        const files = fs.readdirSync(uploadDir).filter(file => file.includes(childId));
+        const files = fs.readdirSync(uploadDir).filter(file => file.includes(childId) && (file.startsWith('text-') || file.startsWith('meta-') || ['image', 'video', 'audio'].some(type => file.startsWith(type))));
         console.log(`Arquivos encontrados para ${childId}:`, files);
 
         for (const file of files) {
             try {
+                const filePath = path.join(uploadDir, file);
                 const parts = file.split('-');
                 if (parts.length < 3) {
                     console.log(`Arquivo com formato inválido: ${file}, ignorando`);
@@ -143,7 +141,6 @@ app.get('/get-conversations/:childId', (req, res) => {
                 const fileChildId = parts[1];
                 const timestampWithExt = parts.slice(2).join('-');
                 const timestamp = timestampWithExt.split('.')[0];
-                const ext = path.extname(file);
 
                 if (fileChildId !== childId) {
                     console.log(`Arquivo ${file} não pertence a childId ${childId}, ignorando`);
@@ -151,34 +148,29 @@ app.get('/get-conversations/:childId', (req, res) => {
                 }
 
                 if (type === 'text') {
-                    const content = fs.readFileSync(path.join(uploadDir, file), 'utf-8');
-                    try {
-                        const parsedContent = JSON.parse(content);
-                        conversations.push({
-                            childId: fileChildId,
-                            type: parsedContent.type || 'text',
-                            timestamp: parsedContent.timestamp,
-                            message: parsedContent.message || '',
-                            direction: parsedContent.direction || 'unknown',
-                            contactOrGroup: parsedContent.contactOrGroup || 'unknown'
-                        });
-                    } catch (parseError) {
-                        console.error(`Erro ao parsear JSON do arquivo ${file}: ${parseError.message}`);
-                    }
+                    const content = fs.readFileSync(filePath, 'utf-8');
+                    const parsedContent = JSON.parse(content);
+                    conversations.push({
+                        childId: fileChildId,
+                        type: parsedContent.type || 'text',
+                        timestamp: parsedContent.timestamp,
+                        message: parsedContent.message || '',
+                        direction: parsedContent.direction || 'unknown',
+                        contactOrGroup: parsedContent.contactOrGroup || 'unknown',
+                        phoneNumber: parsedContent.phoneNumber || 'unknown_number'
+                    });
                 } else if (['image', 'video', 'audio'].includes(type)) {
-                    const baseFileName = file.split('.')[0];
-                    const metaFile = `meta-${childId}-${baseFileName.split('-').slice(2).join('-')}.json`;
+                    const baseFileName = file.split('.')[0].replace(`${type}-${childId}-`, '');
+                    const metaFile = `meta-${childId}-${baseFileName}.json`;
                     let direction = 'received';
                     let contactOrGroup = 'unknown';
+                    let phoneNumber = 'unknown_number';
                     if (fs.existsSync(path.join(uploadDir, metaFile))) {
                         const metaContent = fs.readFileSync(path.join(uploadDir, metaFile), 'utf-8');
-                        try {
-                            const parsedMeta = JSON.parse(metaContent);
-                            direction = parsedMeta.direction || 'received';
-                            contactOrGroup = parsedMeta.contactOrGroup || 'unknown';
-                        } catch (parseError) {
-                            console.error(`Erro ao parsear metadados ${metaFile}: ${parseError.message}`);
-                        }
+                        const parsedMeta = JSON.parse(metaContent);
+                        direction = parsedMeta.direction || 'received';
+                        contactOrGroup = parsedMeta.contactOrGroup || 'unknown';
+                        phoneNumber = parsedMeta.phoneNumber || 'unknown_number';
                     }
                     conversations.push({
                         childId: fileChildId,
@@ -186,10 +178,9 @@ app.get('/get-conversations/:childId', (req, res) => {
                         filePath: `/uploads/${file}`,
                         timestamp: timestamp,
                         direction: direction,
-                        contactOrGroup: contactOrGroup
+                        contactOrGroup: contactOrGroup,
+                        phoneNumber: phoneNumber
                     });
-                } else {
-                    console.log(`Tipo de arquivo desconhecido: ${type}, arquivo: ${file}, ignorando`);
                 }
             } catch (error) {
                 console.error(`Erro ao processar arquivo ${file}: ${error.message}`);
@@ -197,18 +188,24 @@ app.get('/get-conversations/:childId', (req, res) => {
         }
 
         // Agrupar por contactOrGroup e ordenar por timestamp dentro de cada grupo
-        const groupedConversations = {};
-        conversations.sort((a, b) => parseInt(a.timestamp) - parseInt(b.timestamp)); // Ordenar por timestamp
+        const groupedConversations = [];
+        conversations.sort((a, b) => parseInt(b.timestamp) - parseInt(a.timestamp)); // Ordenar por timestamp decrescente
+        const seenGroups = new Set();
         conversations.forEach(conversation => {
-            const group = conversation.contactOrGroup || 'unknown';
-            if (!groupedConversations[group]) {
-                groupedConversations[group] = [];
+            const groupKey = `${conversation.contactOrGroup}_${conversation.phoneNumber}`;
+            if (!seenGroups.has(groupKey)) {
+                seenGroups.add(groupKey);
+                groupedConversations.push({
+                    contactOrGroup: conversation.contactOrGroup,
+                    phoneNumber: conversation.phoneNumber,
+                    messages: conversations.filter(c => c.contactOrGroup === conversation.contactOrGroup && c.phoneNumber === conversation.phoneNumber)
+                        .sort((a, b) => parseInt(b.timestamp) - parseInt(a.timestamp)) // Ordenar mensagens por timestamp
+                });
             }
-            groupedConversations[group].push(conversation);
         });
 
         console.log(`Conversas agrupadas retornadas para ${childId}:`, groupedConversations);
-        res.status(200).json(groupedConversations);
+        res.status(200).json(groupedConversations.length > 0 ? groupedConversations : []);
     } catch (error) {
         console.error(`Erro ao processar get-conversations/${childId}: ${error.message}`);
         res.status(500).json({ message: 'Erro ao buscar conversas', error: error.message });
@@ -264,14 +261,13 @@ app.post('/rename-child-id/:oldChildId/:newChildId', (req, res) => {
             fs.renameSync(oldFilePath, newFilePath);
             console.log(`Arquivo renomeado de ${file} para ${newFileName}`);
 
-            // Renomear o arquivo de metadados associado, se existir
             if (['image', 'video', 'audio'].includes(type)) {
                 const baseOldName = file.split('.')[0].replace(`${type}-${oldChildId}-`, '');
                 const oldMetaFile = path.join(uploadDir, `meta-${oldChildId}-${baseOldName}.json`);
                 const newMetaFile = path.join(uploadDir, `meta-${newChildId}-${baseOldName}.json`);
                 if (fs.existsSync(oldMetaFile)) {
                     fs.renameSync(oldMetaFile, newMetaFile);
-                    console.log(`Arquivo de metadados renomeado de meta-${oldChildId}-${baseOldName}.json para meta-${newChildId}-${baseOldName}.json`);
+                    console.log(`Arquivo de metadados renomeado de ${oldMetaFile} para ${newMetaFile}`);
                 }
             }
         }
@@ -293,5 +289,5 @@ app.use((req, res) => {
 
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
-    console.log(`PORTA AMBIENTE: ${process.env.PORT}`); // Log para depurar a porta
+    console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
 });
