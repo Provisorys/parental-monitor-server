@@ -2,8 +2,8 @@ const express = require('express');
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const path = require('path');
-const fs = require('fs'); // Manter fs por enquanto para a rota /get-conversations e /get-child-ids até migrarmos para DynamoDB
+// const path = require('path'); // Não precisamos mais para salvar arquivos locais
+// const fs = require('fs'); // Não precisamos mais para salvar arquivos locais
 const { v4: uuidv4 } = require('uuid'); // Para gerar IDs únicos para mensagens
 
 // SDK da AWS
@@ -26,7 +26,7 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
 // Nomes das tabelas DynamoDB (use variáveis de ambiente para produção)
-const DYNAMODB_TABLE_CHILDREN = process.env.DYNAMODB_TABLE_CHILDREN || 'Children'; //
+const DYNAMODB_TABLE_CHILDREN = process.env.DYNAMODB_TABLE_CHILDREN || 'Children';
 const DYNAMODB_TABLE_MESSAGES = process.env.DYNAMODB_TABLE_MESSAGES || 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = process.env.DYNAMODB_TABLE_CONVERSATIONS || 'Conversations';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; // Nome do seu bucket S3
@@ -99,7 +99,7 @@ app.post('/notifications', async (req, res) => {
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             Key: {
                 childId: childId,
-                contactOrGroup: contactOrGroupValue
+                contactOrGroup: contactOrGroupValue // contactOrGroup é a SK da Conversations
             },
             UpdateExpression: 'SET #ts = :timestamp, #lm = :lastMessage, #pn = :phoneNumber, #dir = :direction',
             ExpressionAttributeNames: {
@@ -147,7 +147,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
 
     const contactOrGroupValue = contactOrGroup || 'unknown';
     const phoneNumberValue = phoneNumber || 'unknown_number';
-    const fileExtension = path.extname(file.originalname).toLowerCase();
+    const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : ''; // Extrai extensão de forma segura
     const mediaId = uuidv4();
     const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
 
@@ -231,6 +231,7 @@ app.get('/get-conversations/:childId', async (req, res) => {
 
     try {
         // 1. Buscar todas as conversas para este childId na tabela Conversations
+        // A tabela Conversations tem childId como Partition Key (PK) e contactOrGroup como Sort Key (SK).
         const conversationsParams = {
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             KeyConditionExpression: 'childId = :cid',
@@ -249,14 +250,21 @@ app.get('/get-conversations/:childId', async (req, res) => {
         }
 
         // 2. Para cada conversa, buscar as mensagens correspondentes na tabela Messages
+        // A tabela Messages tem childId como Partition Key (PK) e id como Sort Key (SK).
+        // Precisamos de um GSI (Global Secondary Index) em Messages que use contactOrGroup e phoneNumber
+        // para buscar mensagens de uma conversa específica ou scanear e filtrar.
+        // Assumindo que você tem um GSI ou vai filtrar o scan, vamos usar Scan para demonstração.
+        // Para melhor performance, crie um GSI em 'Messages' com Partition Key 'childId' e Sort Key 'contactOrGroup'.
         const groupedConversations = [];
 
         for (const conv of rawConversations) {
             const messagesParams = {
                 TableName: DYNAMODB_TABLE_MESSAGES,
-                // Assumindo que 'childId' é a Partition Key e 'contactOrGroup' ou um GSI é usado
-                KeyConditionExpression: 'childId = :cid',
-                FilterExpression: 'contactOrGroup = :cog AND phoneNumber = :pn',
+                // Idealmente, você usaria um GSI aqui para 'contactOrGroup' e 'phoneNumber'
+                // ou apenas 'contactOrGroup' para o childId.
+                // Como não temos um GSI definido, vamos usar um SCAN com FilterExpression.
+                // ATENÇÃO: SCANs são caros e lentos para grandes volumes de dados.
+                FilterExpression: 'childId = :cid AND contactOrGroup = :cog AND phoneNumber = :pn',
                 ExpressionAttributeValues: {
                     ':cid': childId,
                     ':cog': conv.contactOrGroup,
@@ -264,8 +272,8 @@ app.get('/get-conversations/:childId', async (req, res) => {
                 }
             };
 
-            console.log(`Tentando buscar mensagens para conversa: ${conv.contactOrGroup} (${conv.phoneNumber})`);
-            const messagesData = await docClient.query(messagesParams).promise();
+            console.log(`Tentando buscar mensagens (SCAN) para conversa: ${conv.contactOrGroup} (${conv.phoneNumber})`);
+            const messagesData = await docClient.scan(messagesParams).promise(); // Usando scan
             const messages = messagesData.Items;
             console.log(`Mensagens encontradas para ${conv.contactOrGroup}:`, messages.length);
 
@@ -304,7 +312,7 @@ app.get('/get-child-ids', async (req, res) => {
 
     try {
         console.log('Tentando escanear child IDs na tabela Children do DynamoDB.');
-        const data = await docClient.scan(params).promise();
+        const data = await docClient.scan(params).promise(); // Usando scan, pois não há filtro de PK/SK aqui
         const childIds = [...new Set(data.Items.map(item => item.childId))]; // Garante IDs únicos
         console.log(`childIds encontrados no DynamoDB:`, childIds);
         res.status(200).json(childIds);
@@ -357,7 +365,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`); //
-    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`); //
-    console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`); //
+    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`);
+    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`);
+    console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
 });
