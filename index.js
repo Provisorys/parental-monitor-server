@@ -10,23 +10,23 @@ const app = express();
 const PORT = process.env.PORT; // A porta do Render é fornecida via variável de ambiente
 
 // Configuração da AWS
-// **ATENÇÃO: CREDENCIAIS HARD-CODED TEMPORARIAMENTE PARA TESTE.**
-// **ISSO É UMA MÁ PRÁTICA DE SEGURANÇA E DEVE SER REMOVIDO IMEDIATAMENTE APÓS O TESTE.**
+// *** REVERTIDO PARA USAR process.env PARA AS CHAVES ***
+// Se o Render ainda não estiver injetando, este é o ponto onde vai falhar novamente.
 AWS.config.update({
-    accessKeyId: 'AKIA2EMP3DRMLNLXF4K7', // SUA CHAVE DE ACESSO REAL AQUI
-    secretAccessKey: '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', // SUA CHAVE SECRETA REAL AQUI
-    region: 'us-east-1' // Mantenha este hard-coded por enquanto
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION || 'us-east-1' // Usar variável de ambiente para região também
 });
 
 // Clientes AWS
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-// Nomes das tabelas DynamoDB (use variáveis de ambiente para produção)
+// Nomes das tabelas DynamoDB (agora todas via variáveis de ambiente)
 const DYNAMODB_TABLE_CHILDREN = process.env.DYNAMODB_TABLE_CHILDREN || 'Children';
 const DYNAMODB_TABLE_MESSAGES = process.env.DYNAMODB_TABLE_MESSAGES || 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = process.env.DYNAMODB_TABLE_CONVERSATIONS || 'Conversations';
-const S3_BUCKET_NAME = 'parental-monitor-midias-provisory'; // Mantenha este hard-coded por enquanto
+const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; // Usar variável de ambiente para o bucket
 
 // Middlewares
 app.use(cors());
@@ -71,7 +71,6 @@ app.post('/notifications', async (req, res) => {
     const phoneNumberValue = phoneNumber || 'unknown_number';
 
     const messageItem = {
-        // id: uuidv4(), // Antigo: Gerava string, mas a tabela espera Number
         id: timestampValue + Math.floor(Math.random() * 1000), // NOVO: Gerando ID numérico único
         childId,
         message,
@@ -146,12 +145,11 @@ app.post('/media', upload.single('file'), async (req, res) => {
     const contactOrGroupValue = contactOrGroup || 'unknown';
     const phoneNumberValue = phoneNumber || 'unknown_number';
     const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : ''; // Extrai extensão de forma segura
-    // const mediaId = uuidv4(); // Antigo: Gerava string, mas a tabela espera Number
     const mediaId = timestampValue + Math.floor(Math.random() * 1000); // NOVO: Gerando ID numérico único
     const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
 
     const s3UploadParams = {
-        Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME HARD-CODED
+        Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME DA VARIÁVEL DE AMBIENTE
         Key: s3Key,
         Body: file.buffer, // Buffer do arquivo em memória
         ContentType: file.mimetype
@@ -228,7 +226,6 @@ app.get('/get-conversations/:childId', async (req, res) => {
 
     try {
         // 1. Buscar todas as conversas para este childId na tabela Conversations
-        // A tabela Conversations tem childId como Partition Key (PK) e contactOrGroup como Sort Key (SK).
         const conversationsParams = {
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             KeyConditionExpression: 'childId = :cid',
@@ -247,20 +244,11 @@ app.get('/get-conversations/:childId', async (req, res) => {
         }
 
         // 2. Para cada conversa, buscar as mensagens correspondentes na tabela Messages
-        // A tabela Messages tem childId como Partition Key (PK) e id como Sort Key (SK).
-        // Precisamos de um GSI (Global Secondary Index) em Messages que use contactOrGroup e phoneNumber
-        // para buscar mensagens de uma conversa específica ou scanear e filtrar.
-        // Assumindo que você tem um GSI ou vai filtrar o scan, vamos usar Scan para demonstração.
-        // Para melhor performance, crie um GSI em 'Messages' com Partition Key 'childId' e Sort Key 'contactOrGroup'.
         const groupedConversations = [];
 
         for (const conv of rawConversations) {
             const messagesParams = {
                 TableName: DYNAMODB_TABLE_MESSAGES,
-                // Idealmente, você usaria um GSI aqui para 'contactOrGroup' e 'phoneNumber'
-                // ou apenas 'contactOrGroup' para o childId.
-                // Como não temos um GSI definido, vamos usar um SCAN com FilterExpression.
-                // ATENÇÃO: SCANs são caros e lentos para grandes volumes de dados.
                 FilterExpression: 'childId = :cid AND contactOrGroup = :cog AND phoneNumber = :pn',
                 ExpressionAttributeValues: {
                     ':cid': childId,
@@ -330,14 +318,6 @@ app.post('/rename-child-id/:oldChildId/:newChildId', async (req, res) => {
     }
 
     try {
-        // A funcionalidade de renomear childId em DynamoDB/S3 é complexa e requer lógica de migração de dados.
-        // Isso normalmente envolve:
-        // 1. Consultar todos os itens do oldChildId em TODAS as tabelas (Children, Messages, Conversations).
-        // 2. Criar novos itens com o newChildId para cada item encontrado.
-        // 3. Deletar os itens antigos com o oldChildId.
-        // 4. Para S3: Copiar objetos do prefixo oldChildId para newChildId e depois deletar os antigos.
-        // Isso pode ser demorado e deve ser tratado em um processo assíncrono (ex: AWS Lambda, Fargate task),
-        // não em uma requisição HTTP direta, para evitar timeouts.
         console.warn(`Atenção: A função de renomear childId não está totalmente implementada para DynamoDB/S3. Esta operação é complexa e não é recomendada para execução em requisição HTTP direta.`);
         return res.status(501).json({ message: 'A funcionalidade de renomear childId não está totalmente implementada para DynamoDB/S3 e precisa de uma solução robusta para migração de dados.' });
 
@@ -362,10 +342,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    // Estes logs agora devem mostrar as credenciais diretamente, pois estão hard-coded.
-    console.log(`Região AWS configurada: ${AWS.config.region}`); // Deve mostrar 'us-east-1'
-    console.log(`Bucket S3 configurado: ${S3_BUCKET_NAME}`); // Deve mostrar 'parental-monitor-midias-provisory'
-    console.log(`Access Key ID AWS configurada: ${AWS.config.accessKeyId ? 'Sim' : 'Não'}`);
-    console.log(`Secret Access Key AWS configurada: ${AWS.config.secretAccessKey ? 'Sim' : 'Não'}`);
+    // Estes logs agora devem mostrar 'Sim' para as chaves SE o Render estiver injetando corretamente.
+    console.log(`Região AWS configurada: ${process.env.AWS_REGION ? process.env.AWS_REGION : 'Não'}`);
+    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME ? process.env.S3_BUCKET_NAME : 'Não'}`);
+    console.log(`Access Key ID AWS configurada: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
+    console.log(`Secret Access Key AWS configurada: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
 });
