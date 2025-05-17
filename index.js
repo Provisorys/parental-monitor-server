@@ -11,12 +11,13 @@ const app = express();
 const PORT = process.env.PORT; // A porta do Render é fornecida via variável de ambiente
 
 // Configuração da AWS
-// Certifique-se de que AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY e AWS_REGION
-// estão definidos nas variáveis de ambiente do Render.
+// CERTIFIQUE-SE DE QUE ESTES VALORES ESTÃO CORRETOS PARA SUA CONTA AWS
+// ESTA É UMA SOLUÇÃO TEMPORÁRIA APENAS PARA TESTE.
+// VOCÊ DEVE REMOVER OS VALORES HARD-CODED E VOLTAR PARA process.env ASSIM QUE O PROBLEMA DE AMBIENTE DO RENDER FOR RESOLVIDO.
 AWS.config.update({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    region: process.env.AWS_REGION // Deve ser 'us-east-1' para suas tabelas atuais
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID, // Mantenha este do process.env
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY, // Mantenha este do process.env
+    region: 'us-east-1' // HARD-CODED TEMPORARIAMENTE PARA TESTE
 });
 
 // Clientes AWS
@@ -27,7 +28,7 @@ const s3 = new AWS.S3();
 const DYNAMODB_TABLE_CHILDREN = process.env.DYNAMODB_TABLE_CHILDREN || 'Children';
 const DYNAMODB_TABLE_MESSAGES = process.env.DYNAMODB_TABLE_MESSAGES || 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = process.env.DYNAMODB_TABLE_CONVERSATIONS || 'Conversations';
-const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; // Nome do seu bucket S3
+const S3_BUCKET_NAME = 'parental-monitor-midias-provisory'; // HARD-CODED TEMPORARIAMENTE PARA TESTE
 
 // Middlewares
 app.use(cors());
@@ -152,7 +153,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
     const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
 
     const s3UploadParams = {
-        Bucket: S3_BUCKET_NAME,
+        Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME HARD-CODED
         Key: s3Key,
         Body: file.buffer, // Buffer do arquivo em memória
         ContentType: file.mimetype
@@ -363,7 +364,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`);
-    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`);
+    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`); // Esta ainda mostrará undefined, mas o hard-code estará em vigor
+    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`); // Esta ainda mostrará undefined, mas o hard-code estará em vigor
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
 });
