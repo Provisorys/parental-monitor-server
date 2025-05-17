@@ -10,23 +10,22 @@ const app = express();
 const PORT = process.env.PORT; // A porta do Render é fornecida via variável de ambiente
 
 // Configuração da AWS
-// *** REVERTIDO PARA USAR process.env PARA AS CHAVES ***
-// Se o Render ainda não estiver injetando, este é o ponto onde vai falhar novamente.
+// *** HARD-CODED AS CHAVES AWS TEMPORARIAMENTE DEVIDO A PROBLEMAS DE INJEÇÃO DE VARIÁVEIS DE AMBIENTE NO RENDER ***
 AWS.config.update({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    region: process.env.AWS_REGION || 'us-east-1' // Usar variável de ambiente para região também
+    accessKeyId: 'AKIA2EMP3DRMLNLXF4K7', // <-- COLOQUE SUA ACCESS KEY ID AQUI
+    secretAccessKey: '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', // <-- COLOQUE SUA SECRET ACCESS KEY AQUI
+    region: 'us-east-1' // Região AWS
 });
 
 // Clientes AWS
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-// Nomes das tabelas DynamoDB (agora todas via variáveis de ambiente)
-const DYNAMODB_TABLE_CHILDREN = process.env.DYNAMODB_TABLE_CHILDREN || 'Children';
-const DYNAMODB_TABLE_MESSAGES = process.env.DYNAMODB_TABLE_MESSAGES || 'Messages';
-const DYNAMODB_TABLE_CONVERSATIONS = process.env.DYNAMODB_TABLE_CONVERSATIONS || 'Conversations';
-const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; // Usar variável de ambiente para o bucket
+// Nomes das tabelas DynamoDB e S3 Bucket (hard-coded ou com fallback, para garantir funcionamento)
+const DYNAMODB_TABLE_CHILDREN = 'Children';
+const DYNAMODB_TABLE_MESSAGES = 'Messages';
+const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
+const S3_BUCKET_NAME = 'parental-monitor-midias-provisory';
 
 // Middlewares
 app.use(cors());
@@ -149,7 +148,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
     const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
 
     const s3UploadParams = {
-        Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME DA VARIÁVEL DE AMBIENTE
+        Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME HARD-CODED
         Key: s3Key,
         Body: file.buffer, // Buffer do arquivo em memória
         ContentType: file.mimetype
@@ -342,10 +341,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    // Estes logs agora devem mostrar 'Sim' para as chaves SE o Render estiver injetando corretamente.
-    console.log(`Região AWS configurada: ${process.env.AWS_REGION ? process.env.AWS_REGION : 'Não'}`);
-    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME ? process.env.S3_BUCKET_NAME : 'Não'}`);
-    console.log(`Access Key ID AWS configurada: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
-    console.log(`Secret Access Key AWS configurada: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
+    // Estes logs agora devem mostrar os valores hard-coded.
+    console.log(`Região AWS configurada: ${AWS.config.region}`);
+    console.log(`Bucket S3 configurado: ${S3_BUCKET_NAME}`);
+    console.log(`Access Key ID AWS configurada: ${AWS.config.accessKeyId ? 'Sim' : 'Não'}`);
+    console.log(`Secret Access Key AWS configurada: ${AWS.config.secretAccessKey ? 'Sim' : 'Não'}`);
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
 });
