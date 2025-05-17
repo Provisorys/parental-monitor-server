@@ -1,2 +1,11 @@
-"node_modules/" 
-"uploads/" 
+# Node.js
+node_modules/
+.env
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# Logs de desenvolvimento
+*.log
+# Arquivos temporários
+tmp/
+uploads/ # Se você não quer que os uploads locais sejam versionados
