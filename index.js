@@ -11,12 +11,13 @@ const app = express();
 const PORT = process.env.PORT; // A porta do Render é fornecida via variável de ambiente
 
 // Configuração da AWS
-// CERTIFIQUE-SE DE QUE ESTES VALORES ESTÃO CORRETOS PARA SUA CONTA AWS
-// ESTA É UMA SOLUÇÃO TEMPORÁRIA APENAS PARA TESTE.
-// VOCÊ DEVE REMOVER OS VALORES HARD-CODED E VOLTAR PARA process.env ASSIM QUE O PROBLEMA DE AMBIENTE DO RENDER FOR RESOLVIDO.
+// **ATENÇÃO: ESTA É UMA SOLUÇÃO TEMPORÁRIA E INSEGURA PARA TESTE!**
+// ESTAS CREDENCIAIS ESTÃO HARD-CODED. VOCÊ DEVE REMOVÊ-LAS E VOLTAR
+// PARA O USO DE VARIÁVEIS DE AMBIENTE (process.env.AWS_ACCESS_KEY_ID, process.env.AWS_SECRET_ACCESS_KEY)
+// ASSIM QUE O PROBLEMA DE AMBIENTE DO RENDER FOR RESOLVIDO.
 AWS.config.update({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID, // Mantenha este do process.env
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY, // Mantenha este do process.env
+    accessKeyId: 'AKIA2EMP3DRMLNLXF4K7', // SUA CHAVE DE ACESSO REAL HARD-CODED TEMPORARIAMENTE
+    secretAccessKey: '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', // SUA CHAVE DE ACESSO SECRETA REAL HARD-CODED TEMPORARIAMENTE
     region: 'us-east-1' // HARD-CODED TEMPORARIAMENTE PARA TESTE
 });
 
@@ -364,7 +365,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`); // Esta ainda mostrará undefined, mas o hard-code estará em vigor
-    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`); // Esta ainda mostrará undefined, mas o hard-code estará em vigor
+    // Mantenha estes console.log para continuar verificando se o Render 'resolve' o problema de variáveis de ambiente
+    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`);
+    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`);
+    console.log(`Access Key ID AWS configurada: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`); // Adicione este log para verificar
+    console.log(`Secret Access Key AWS configurada: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`); // Adicione este log para verificar
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
 });
