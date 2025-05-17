@@ -2,9 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-// const path = require('path'); // Não precisamos mais para salvar arquivos locais
-// const fs = require('fs'); // Não precisamos mais para salvar arquivos locais
-const { v4: uuidv4 } = require('uuid'); // Para gerar IDs únicos para mensagens
+// const { v4: uuidv4 } = require('uuid'); // Removido: Não precisamos mais de uuidv4 para IDs numéricos
 
 // SDK da AWS
 const AWS = require('aws-sdk');
@@ -74,7 +72,8 @@ app.post('/notifications', async (req, res) => {
     const phoneNumberValue = phoneNumber || 'unknown_number';
 
     const messageItem = {
-        id: uuidv4(), // ID único para a mensagem
+        // id: uuidv4(), // Antigo: Gerava string, mas a tabela espera Number
+        id: timestampValue + Math.floor(Math.random() * 1000), // NOVO: Gerando ID numérico único
         childId,
         message,
         messageType: messageTypeString,
@@ -148,7 +147,8 @@ app.post('/media', upload.single('file'), async (req, res) => {
     const contactOrGroupValue = contactOrGroup || 'unknown';
     const phoneNumberValue = phoneNumber || 'unknown_number';
     const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : ''; // Extrai extensão de forma segura
-    const mediaId = uuidv4();
+    // const mediaId = uuidv4(); // Antigo: Gerava string, mas a tabela espera Number
+    const mediaId = timestampValue + Math.floor(Math.random() * 1000); // NOVO: Gerando ID numérico único
     const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
 
     const s3UploadParams = {
@@ -165,8 +165,6 @@ app.post('/media', upload.single('file'), async (req, res) => {
         messageType: type || file.mimetype, // Pode ser 'image', 'video', 'audio' ou mimetype
         timestamp: timestampValue,
         contactOrGroup: contactOrGroupValue,
-        phoneNumber: phoneNumberValue,
-        direction: direction,
         s3Url: `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}` // URL pública do S3 (ajuste se usar CloudFront)
     };
 
