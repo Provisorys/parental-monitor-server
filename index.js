@@ -10,11 +10,11 @@ const app = express();
 const PORT = process.env.PORT; // A porta do Render é fornecida via variável de ambiente
 
 // Configuração da AWS
-// **AQUI ESTAMOS VOLTANDO PARA process.env PARA AS CHAVES**
-// region e S3_BUCKET_NAME ainda estão hard-coded para teste.
+// **ATENÇÃO: CREDENCIAIS HARD-CODED TEMPORARIAMENTE PARA TESTE.**
+// **ISSO É UMA MÁ PRÁTICA DE SEGURANÇA E DEVE SER REMOVIDO IMEDIATAMENTE APÓS O TESTE.**
 AWS.config.update({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    accessKeyId: 'AKIA2EMP3DRMLNLXF4K7', // SUA CHAVE DE ACESSO REAL AQUI
+    secretAccessKey: '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', // SUA CHAVE SECRETA REAL AQUI
     region: 'us-east-1' // Mantenha este hard-coded por enquanto
 });
 
@@ -148,7 +148,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
     const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : ''; // Extrai extensão de forma segura
     // const mediaId = uuidv4(); // Antigo: Gerava string, mas a tabela espera Number
     const mediaId = timestampValue + Math.floor(Math.random() * 1000); // NOVO: Gerando ID numérico único
-    const s3Key = `media/<span class="math-inline">\{childId\}/</span>{mediaId}${fileExtension}`; // Caminho no S3
+    const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
 
     const s3UploadParams = {
         Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME HARD-CODED
@@ -164,7 +164,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
         messageType: type || file.mimetype, // Pode ser 'image', 'video', 'audio' ou mimetype
         timestamp: timestampValue,
         contactOrGroup: contactOrGroupValue,
-        s3Url: `https://<span class="math-inline">\{S3\_BUCKET\_NAME\}\.s3\.amazonaws\.com/</span>{s3Key}` // URL pública do S3 (ajuste se usar CloudFront)
+        s3Url: `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}` // URL pública do S3 (ajuste se usar CloudFront)
     };
 
     const putMessageParams = {
@@ -269,7 +269,7 @@ app.get('/get-conversations/:childId', async (req, res) => {
                 }
             };
 
-            console.log(`Tentando buscar mensagens (SCAN) para conversa: <span class="math-inline">\{conv\.contactOrGroup\} \(</span>{conv.phoneNumber})`);
+            console.log(`Tentando buscar mensagens (SCAN) para conversa: ${conv.contactOrGroup} (${conv.phoneNumber})`);
             const messagesData = await docClient.scan(messagesParams).promise(); // Usando scan
             const messages = messagesData.Items;
             console.log(`Mensagens encontradas para ${conv.contactOrGroup}:`, messages.length);
@@ -362,10 +362,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    // Mantenha estes console.log para continuar verificando se o Render 'resolve' o problema de variáveis de ambiente
-    console.log(`Região AWS configurada: ${process.env.AWS_REGION}`);
-    console.log(`Bucket S3 configurado: ${process.env.S3_BUCKET_NAME}`);
-    console.log(`Access Key ID AWS configurada: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`); // Adicione este log para verificar
-    console.log(`Secret Access Key AWS configurada: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`); // Adicione este log para verificar
-    console.log(`Tabelas DynamoDB: Children=<span class="math-inline">\{DYNAMODB\_TABLE\_CHILDREN\}, Messages\=</span>{DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
+    // Estes logs agora devem mostrar as credenciais diretamente, pois estão hard-coded.
+    console.log(`Região AWS configurada: ${AWS.config.region}`); // Deve mostrar 'us-east-1'
+    console.log(`Bucket S3 configurado: ${S3_BUCKET_NAME}`); // Deve mostrar 'parental-monitor-midias-provisory'
+    console.log(`Access Key ID AWS configurada: ${AWS.config.accessKeyId ? 'Sim' : 'Não'}`);
+    console.log(`Secret Access Key AWS configurada: ${AWS.config.secretAccessKey ? 'Sim' : 'Não'}`);
+    console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
 });
