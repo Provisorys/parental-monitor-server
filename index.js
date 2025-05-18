@@ -2,66 +2,61 @@ const express = require('express');
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-
-// SDK da AWS
 const AWS = require('aws-sdk');
 
-const app = express();
-const PORT = process.env.PORT; // A porta do Render é fornecida via variável de ambiente
+// SDK do Agora para geração de tokens
+const { RtcTokenBuilder, RtcRole } = require('agora-access-token'); // Ou 'agora-token'
 
-// Configuração da AWS
-// *** HARD-CODED AS CHAVES AWS TEMPORARIAMENTE DEVIDO A PROBLEMAS DE INJEÇÃO DE VARIÁVEIS DE AMBIENTE NO RENDER ***
+const app = express();
+const PORT = process.env.PORT;
+
+// --- AWS CONFIG ---
+// ATENÇÃO: Credenciais hard-coded são inseguras em produção.
+// Mantenha-as aqui apenas enquanto o Render não resolve a injeção de variáveis de ambiente.
 AWS.config.update({
-    accessKeyId: 'AKIA2EMP3DRMLNLXF4K7', // <-- COLOQUE SUA ACCESS KEY ID AQUI
-    secretAccessKey: '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', // <-- COLOQUE SUA SECRET ACCESS KEY AQUI
-    region: 'us-east-1' // Região AWS
+    accessKeyId: 'AKIA2EMP3DRMLNLXF4K7',
+    secretAccessKey: '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',
+    region: 'us-east-1'
 });
 
-// Clientes AWS
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-// Nomes das tabelas DynamoDB e S3 Bucket (hard-coded ou com fallback, para garantir funcionamento)
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const S3_BUCKET_NAME = 'parental-monitor-midias-provisory';
 
-// Middlewares
+// --- AGORA.IO CONFIG ---
+// ATENÇÃO: Estas credenciais também devem ser variáveis de ambiente!
+const AGORA_APP_ID = '2537397539f642e1b6e955ed09d6ab49'; // <-- Substitua pelo seu App ID do Agora
+const AGORA_APP_CERTIFICATE = '4472585332d446e48c2f36bc55f63f8c'; // <-- Substitua pelo seu App Certificate do Agora
+
+// --- MIDDLEWARES ---
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-
-// Middleware para capturar requisições
 app.use((req, res, next) => {
     console.log(`Requisição recebida: ${req.method} ${req.url}`);
     next();
 });
 
-// Rota padrão
 app.get('/', (req, res) => {
-    console.log('Requisição GET / recebida');
     res.status(200).send('Servidor Parental Monitor rodando!');
 });
 
-// Configuração de upload para arquivos de mídia (ainda usa memória, mas o destino final é o S3)
 const upload = multer({
-    storage: multer.memoryStorage(), // Armazena o arquivo em memória para upload direto para o S3
-    limits: { fileSize: 20 * 1024 * 1024 } // Limite de 20MB para uploads
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 20 * 1024 * 1024 }
 });
 
-// --- Rotas de API com Integração AWS ---
-
-// Rota para receber notificações (mensagens de texto)
+// --- ROTA: /notifications ---
 app.post('/notifications', async (req, res) => {
-    console.log('Requisição POST /notifications recebida.');
     const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber } = req.body;
-    const timestampValue = timestamp || Date.now(); // Usar number para timestamp
-    const messageTypeString = messageType || 'TEXT_MESSAGE'; // Padrão se não for fornecido
+    const timestampValue = timestamp || Date.now();
+    const messageTypeString = messageType || 'TEXT_MESSAGE';
 
-    // Validação básica
     if (!childId || !message) {
-        console.error('Erro: Campos obrigatórios childId ou message ausentes na requisição /notifications.');
         return res.status(400).json({ message: 'childId e message são obrigatórios' });
     }
 
@@ -70,7 +65,7 @@ app.post('/notifications', async (req, res) => {
     const phoneNumberValue = phoneNumber || 'unknown_number';
 
     const messageItem = {
-        id: timestampValue + Math.floor(Math.random() * 1000), // NOVO: Gerando ID numérico único
+        id: timestampValue + Math.floor(Math.random() * 1000),
         childId,
         message,
         messageType: messageTypeString,
@@ -80,22 +75,17 @@ app.post('/notifications', async (req, res) => {
         direction: messageDirection
     };
 
-    const putMessageParams = {
-        TableName: DYNAMODB_TABLE_MESSAGES,
-        Item: messageItem
-    };
-
     try {
-        console.log('Tentando salvar mensagem no DynamoDB:', JSON.stringify(messageItem));
-        await docClient.put(putMessageParams).promise();
-        console.log('Mensagem salva com sucesso no DynamoDB.');
+        await docClient.put({
+            TableName: DYNAMODB_TABLE_MESSAGES,
+            Item: messageItem
+        }).promise();
 
-        // Lógica para atualizar a conversa (se existir uma tabela Conversations)
-        const updateConversationParams = {
+        await docClient.update({
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             Key: {
                 childId: childId,
-                contactOrGroup: contactOrGroupValue // contactOrGroup é a SK da Conversations
+                contactOrGroup: contactOrGroupValue
             },
             UpdateExpression: 'SET #ts = :timestamp, #lm = :lastMessage, #pn = :phoneNumber, #dir = :direction',
             ExpressionAttributeNames: {
@@ -109,77 +99,59 @@ app.post('/notifications', async (req, res) => {
                 ':lastMessage': message,
                 ':phoneNumber': phoneNumberValue,
                 ':direction': messageDirection
-            },
-            ReturnValues: 'UPDATED_NEW' // Retorna os atributos atualizados
-        };
-
-        console.log('Tentando atualizar conversa no DynamoDB:', updateConversationParams.Key);
-        await docClient.update(updateConversationParams).promise();
-        console.log('Conversa atualizada com sucesso no DynamoDB.');
+            }
+        }).promise();
 
         res.status(200).json({ message: 'Notificação recebida e salva com sucesso' });
-
     } catch (error) {
-        console.error('Erro ao salvar notificação ou atualizar conversa no DynamoDB:', error);
-        res.status(500).json({ message: 'Erro interno do servidor ao processar notificação.', error: error.message });
+        console.error('Erro:', error);
+        res.status(500).json({ message: 'Erro interno', error: error.message });
     }
 });
 
-// Rota para receber arquivos de mídia
+// --- ROTA: /media ---
 app.post('/media', upload.single('file'), async (req, res) => {
-    console.log('Requisição POST /media recebida.');
     const { childId, type, timestamp, direction, contactOrGroup, phoneNumber } = req.body;
-    const file = req.file; // Arquivo em memória do multer
+    const file = req.file;
     const timestampValue = timestamp || Date.now();
 
-    if (!file) {
-        console.error('Erro: Arquivo de mídia não foi enviado.');
-        return res.status(400).json({ message: 'Arquivo é obrigatório' });
-    }
+    if (!file) return res.status(400).json({ message: 'Arquivo é obrigatório' });
     if (!direction || !['sent', 'received'].includes(direction)) {
-        console.error('Erro: direction inválido ou ausente para mídia.');
-        return res.status(400).json({ message: 'direction é obrigatório e deve ser "sent" ou "received"' });
+        return res.status(400).json({ message: 'direction deve ser "sent" ou "received"' });
     }
 
     const contactOrGroupValue = contactOrGroup || 'unknown';
     const phoneNumberValue = phoneNumber || 'unknown_number';
-    const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : ''; // Extrai extensão de forma segura
-    const mediaId = timestampValue + Math.floor(Math.random() * 1000); // NOVO: Gerando ID numérico único
-    const s3Key = `media/${childId}/${mediaId}${fileExtension}`; // Caminho no S3
-
-    const s3UploadParams = {
-        Bucket: S3_BUCKET_NAME, // AQUI USAMOS O S3_BUCKET_NAME HARD-CODED
-        Key: s3Key,
-        Body: file.buffer, // Buffer do arquivo em memória
-        ContentType: file.mimetype
-    };
-
-    const messageItem = {
-        id: mediaId, // ID único para a mídia
-        childId,
-        message: `Mídia (${type || file.mimetype})`, // Mensagem descritiva para mídia
-        messageType: type || file.mimetype, // Pode ser 'image', 'video', 'audio' ou mimetype
-        timestamp: timestampValue,
-        contactOrGroup: contactOrGroupValue,
-        s3Url: `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}` // URL pública do S3 (ajuste se usar CloudFront)
-    };
-
-    const putMessageParams = {
-        TableName: DYNAMODB_TABLE_MESSAGES,
-        Item: messageItem
-    };
+    const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : '';
+    const mediaId = timestampValue + Math.floor(Math.random() * 1000);
+    const s3Key = `media/${childId}/${mediaId}${fileExtension}`;
 
     try {
-        console.log('Tentando fazer upload de mídia para S3:', s3Key);
-        await s3.upload(s3UploadParams).promise();
-        console.log('Upload de mídia para S3 concluído com sucesso.');
+        await s3.upload({
+            Bucket: S3_BUCKET_NAME,
+            Key: s3Key,
+            Body: file.buffer,
+            ContentType: file.mimetype
+        }).promise();
 
-        console.log('Tentando salvar metadados da mídia no DynamoDB:', JSON.stringify(messageItem));
-        await docClient.put(putMessageParams).promise();
-        console.log('Metadados da mídia salvos com sucesso no DynamoDB.');
+        const messageItem = {
+            id: mediaId,
+            childId,
+            message: `Mídia (${type || file.mimetype})`,
+            messageType: type || file.mimetype,
+            timestamp: timestampValue,
+            contactOrGroup: contactOrGroupValue,
+            phoneNumber: phoneNumberValue,
+            direction,
+            s3Url: `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`
+        };
 
-        // Lógica para atualizar a conversa na tabela Conversations (assim como nas notificações)
-        const updateConversationParams = {
+        await docClient.put({
+            TableName: DYNAMODB_TABLE_MESSAGES,
+            Item: messageItem
+        }).promise();
+
+        await docClient.update({
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             Key: {
                 childId: childId,
@@ -197,56 +169,35 @@ app.post('/media', upload.single('file'), async (req, res) => {
                 ':lastMessage': `Mídia (${type || file.mimetype})`,
                 ':phoneNumber': phoneNumberValue,
                 ':direction': direction
-            },
-            ReturnValues: 'UPDATED_NEW'
-        };
+            }
+        }).promise();
 
-        console.log('Tentando atualizar conversa (mídia) no DynamoDB:', updateConversationParams.Key);
-        await docClient.update(updateConversationParams).promise();
-        console.log('Conversa (mídia) atualizada com sucesso no DynamoDB.');
-
-        res.status(200).json({ message: 'Mídia recebida e processada com sucesso', s3Url: messageItem.s3Url });
+        res.status(200).json({ message: 'Mídia recebida com sucesso', s3Url: messageItem.s3Url });
 
     } catch (error) {
-        console.error('Erro ao processar mídia (S3 ou DynamoDB):', error);
-        res.status(500).json({ message: 'Erro interno do servidor ao processar mídia.', error: error.message });
+        console.error('Erro:', error);
+        res.status(500).json({ message: 'Erro ao processar mídia', error: error.message });
     }
 });
 
-// Rota para buscar as conversas de um determinado childId
+// --- ROTA: /get-conversations/:childId ---
 app.get('/get-conversations/:childId', async (req, res) => {
-    console.log('Requisição GET /get-conversations/:childId recebida.');
     const { childId } = req.params;
-
-    if (!childId) {
-        console.error('Erro: childId ausente na requisição /get-conversations.');
-        return res.status(400).json({ message: 'childId é obrigatório' });
-    }
+    if (!childId) return res.status(400).json({ message: 'childId é obrigatório' });
 
     try {
-        // 1. Buscar todas as conversas para este childId na tabela Conversations
-        const conversationsParams = {
+        const convData = await docClient.query({
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             KeyConditionExpression: 'childId = :cid',
             ExpressionAttributeValues: {
                 ':cid': childId
             }
-        };
-        console.log('Tentando buscar conversas no DynamoDB para childId:', childId);
-        const conversationsData = await docClient.query(conversationsParams).promise();
-        const rawConversations = conversationsData.Items;
-        console.log(`Conversas encontradas para ${childId}:`, rawConversations.length);
+        }).promise();
 
-        if (!rawConversations || rawConversations.length === 0) {
-            console.log(`Nenhuma conversa encontrada para ${childId}.`);
-            return res.status(200).json([]);
-        }
-
-        // 2. Para cada conversa, buscar as mensagens correspondentes na tabela Messages
         const groupedConversations = [];
 
-        for (const conv of rawConversations) {
-            const messagesParams = {
+        for (const conv of convData.Items) {
+            const scanMessages = await docClient.scan({
                 TableName: DYNAMODB_TABLE_MESSAGES,
                 FilterExpression: 'childId = :cid AND contactOrGroup = :cog AND phoneNumber = :pn',
                 ExpressionAttributeValues: {
@@ -254,14 +205,9 @@ app.get('/get-conversations/:childId', async (req, res) => {
                     ':cog': conv.contactOrGroup,
                     ':pn': conv.phoneNumber
                 }
-            };
+            }).promise();
 
-            console.log(`Tentando buscar mensagens (SCAN) para conversa: ${conv.contactOrGroup} (${conv.phoneNumber})`);
-            const messagesData = await docClient.scan(messagesParams).promise(); // Usando scan
-            const messages = messagesData.Items;
-            console.log(`Mensagens encontradas para ${conv.contactOrGroup}:`, messages.length);
-
-            // Ordenar mensagens por timestamp (mais recentes primeiro)
+            const messages = scanMessages.Items || [];
             messages.sort((a, b) => b.timestamp - a.timestamp);
 
             groupedConversations.push({
@@ -270,81 +216,100 @@ app.get('/get-conversations/:childId', async (req, res) => {
                 lastTimestamp: conv.lastTimestamp,
                 lastMessage: conv.lastMessage,
                 lastDirection: conv.lastDirection,
-                messages: messages
+                messages
             });
         }
 
-        // 3. Ordenar as conversas agrupadas pela última mensagem (mais recente primeiro)
         groupedConversations.sort((a, b) => b.lastTimestamp - a.lastTimestamp);
-
-        console.log(`Conversas agrupadas retornadas para ${childId}:`, groupedConversations.length);
         res.status(200).json(groupedConversations);
 
     } catch (error) {
-        console.error(`Erro ao buscar conversas para childId ${childId} no DynamoDB:`, error);
+        console.error('Erro ao buscar conversas:', error);
         res.status(500).json({ message: 'Erro ao buscar conversas', error: error.message });
     }
 });
 
-// Rota para buscar child IDs
+// --- ROTA: /get-child-ids ---
 app.get('/get-child-ids', async (req, res) => {
-    console.log('Requisição GET /get-child-ids recebida.');
-    const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN,
-        ProjectionExpression: 'childId' // Apenas pega o childId
-    };
-
     try {
-        console.log('Tentando escanear child IDs na tabela Children do DynamoDB.');
-        const data = await docClient.scan(params).promise(); // Usando scan, pois não há filtro de PK/SK aqui
-        const childIds = [...new Set(data.Items.map(item => item.childId))]; // Garante IDs únicos
-        console.log(`childIds encontrados no DynamoDB:`, childIds);
+        const data = await docClient.scan({
+            TableName: DYNAMODB_TABLE_CHILDREN,
+            ProjectionExpression: 'childId'
+        }).promise();
+
+        const childIds = [...new Set(data.Items.map(item => item.childId))];
         res.status(200).json(childIds);
     } catch (error) {
-        console.error('Erro ao listar child IDs no DynamoDB:', error);
         res.status(500).json({ message: 'Erro ao listar child IDs', error: error.message });
     }
 });
 
-// Rota para renomear child ID
+// --- ROTA: /rename-child-id (não implementada) ---
 app.post('/rename-child-id/:oldChildId/:newChildId', async (req, res) => {
-    console.log('Requisição POST /rename-child-id recebida.');
-    const { oldChildId, newChildId } = req.params;
+    return res.status(501).json({
+        message: 'Funcionalidade de renomear childId não está implementada'
+    });
+});
 
-    if (!oldChildId || !newChildId) {
-        console.error('Erro: oldChildId ou newChildId ausentes.');
-        return res.status(400).json({ message: 'oldChildId e newChildId são obrigatórios' });
+// --- NOVA ROTA: /agora-token ---
+// Esta rota gera um token para o Agora.io
+app.get('/agora-token', (req, res) => {
+    const { channelName, uid, role, expiry } = req.query; // channelName é essencial, uid opcional, role/expiry com defaults
+
+    if (!channelName) {
+        return res.status(400).json({ error: 'channelName é obrigatório.' });
     }
+
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTimestamp + (parseInt(expiry) || 3600); // Token válido por 1 hora (3600 segundos) por padrão
+
+    // UID pode ser um número ou 0 para Agora, ou uma string para o novo SDK (agora-token)
+    // Para RtcTokenBuilder, geralmente UID é um número (uid = 0 para guest)
+    const numericUid = parseInt(uid) || 0; // Converte UID para número, ou usa 0
+
+    // RtcRole.PUBLISHER para quem vai enviar áudio (celular do filho)
+    // RtcRole.SUBSCRIBER para quem vai receber áudio (seu app de monitoramento)
+    // Por padrão, quem solicita o token para se conectar a um canal para ouvir o microfone de alguém, é SUBSCRIBER.
+    // Mas se o celular do filho for se conectar para ENVIAR áudio, ele precisará de PUBLISHER.
+    // Você pode parametrizar isso se tiver múltiplos clientes no futuro.
+    const tokenRole = (role === 'publisher') ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
 
     try {
-        console.warn(`Atenção: A função de renomear childId não está totalmente implementada para DynamoDB/S3. Esta operação é complexa e não é recomendada para execução em requisição HTTP direta.`);
-        return res.status(501).json({ message: 'A funcionalidade de renomear childId não está totalmente implementada para DynamoDB/S3 e precisa de uma solução robusta para migração de dados.' });
+        const token = RtcTokenBuilder.buildTokenWithUid(
+            AGORA_APP_ID,
+            AGORA_APP_CERTIFICATE,
+            channelName,
+            numericUid,
+            tokenRole,
+            privilegeExpiredTs
+        );
 
+        res.status(200).json({ token: token });
     } catch (error) {
-        console.error(`Erro ao renomear childId de ${oldChildId} para ${newChildId}:`, error);
-        res.status(500).json({ message: 'Erro ao renomear childId', error: error.message });
+        console.error('Erro ao gerar token Agora:', error);
+        res.status(500).json({ error: 'Erro ao gerar token Agora.io', details: error.message });
     }
 });
 
-// Middleware para capturar erros 404
+
+// --- ERROS ---
 app.use((req, res) => {
-    console.log(`Rota não encontrada (404): ${req.method} ${req.url}`);
     res.status(404).send('Rota não encontrada');
 });
-
-// Tratamento de erros geral
 app.use((err, req, res, next) => {
-    console.error('Erro de servidor não tratado:', err);
+    console.error('Erro de servidor:', err);
     res.status(500).send('Erro interno do servidor.');
 });
 
+// --- INICIO ---
 app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
-    console.log(`PORTA AMBIENTE: ${process.env.PORT}`);
-    // Estes logs agora devem mostrar os valores hard-coded.
-    console.log(`Região AWS configurada: ${AWS.config.region}`);
-    console.log(`Bucket S3 configurado: ${S3_BUCKET_NAME}`);
-    console.log(`Access Key ID AWS configurada: ${AWS.config.accessKeyId ? 'Sim' : 'Não'}`);
-    console.log(`Secret Access Key AWS configurada: ${AWS.config.secretAccessKey ? 'Sim' : 'Não'}`);
+    // Logs de inicialização das credenciais hard-coded para verificação
+    console.log(`Região AWS configurada (hard-coded): ${AWS.config.region}`);
+    console.log(`Bucket S3 configurado (hard-coded): ${S3_BUCKET_NAME}`);
+    console.log(`Access Key ID AWS configurada (hard-coded): ${AWS.config.accessKeyId ? 'Sim' : 'Não'}`);
+    console.log(`Secret Access Key AWS configurada (hard-coded): ${AWS.config.secretAccessKey ? 'Sim' : 'Não'}`);
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
+    console.log(`Agora App ID configurado (hard-coded): ${AGORA_APP_ID ? 'Sim' : 'Não'}`);
+    console.log(`Agora App Certificate configurado (hard-coded): ${AGORA_APP_CERTIFICATE ? 'Sim' : 'Não'}`);
 });
