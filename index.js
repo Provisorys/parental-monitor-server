@@ -3,7 +3,7 @@ const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const AWS = require('aws-sdk');
-const twilio = require('twilio'); // Importe a biblioteca do Twilio
+const twilio = require('twilio');
 const http = require('http');
 const WebSocket = require('ws');
 
@@ -12,24 +12,24 @@ const PORT = process.env.PORT;
 
 // --- AWS CONFIG ---
 AWS.config.update({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID, // Use variável de ambiente
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY, // Use variável de ambiente
-    region: process.env.AWS_REGION || 'us-east-1' // Use variável de ambiente com fallback
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION || 'us-east-1'
 });
 
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-const DYNAMODB_TABLE_CHILDREN = 'Children';
+const DYNAMODB_TABLE_CHILDREN = 'Children';  // Não vamos usar diretamente para obter childIds
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
-const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; // Use variável de ambiente com fallback
+const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
 // --- TWILIO CONFIG ---
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID; // Use variável de ambiente
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN; // Use variável de ambiente
-const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID; // Use variável de ambiente
-const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET; // Use variável de ambiente
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
+const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // --- MIDDLEWARES ---
@@ -52,6 +52,7 @@ const upload = multer({
 
 // --- ROTAS DE API ---
 app.post('/notifications', async (req, res) => {
+    // ... (seu código para /notifications permanece o mesmo)
     const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber } = req.body;
     const timestampValue = timestamp || Date.now();
     const messageTypeString = messageType || 'TEXT_MESSAGE';
@@ -110,6 +111,7 @@ app.post('/notifications', async (req, res) => {
 });
 
 app.post('/media', upload.single('file'), async (req, res) => {
+    // ... (seu código para /media permanece o mesmo)
     const { childId, type, timestamp, direction, contactOrGroup, phoneNumber } = req.body;
     const file = req.file;
     const timestampValue = timestamp || Date.now();
@@ -180,6 +182,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
 });
 
 app.get('/get-conversations/:childId', async (req, res) => {
+    // ... (seu código para /get-conversations/:childId permanece o mesmo)
     const { childId } = req.params;
     if (!childId) return res.status(400).json({ message: 'childId é obrigatório' });
 
@@ -230,13 +233,15 @@ app.get('/get-conversations/:childId', async (req, res) => {
 app.get('/get-child-ids', async (req, res) => {
     try {
         const data = await docClient.scan({
-            TableName: DYNAMODB_TABLE_CHILDREN,
-            ProjectionExpression: 'childId'
+            TableName: DYNAMODB_TABLE_CONVERSATIONS, // Alterado para CONVERSATIONS
+            ProjectionExpression: 'childId',       // Pegamos o childId
         }).promise();
 
+        // Extrai os childIds únicos do resultado
         const childIds = [...new Set(data.Items.map(item => item.childId))];
         res.status(200).json(childIds);
     } catch (error) {
+        console.error('Erro ao listar child IDs:', error);
         res.status(500).json({ message: 'Erro ao listar child IDs', error: error.message });
     }
 });
@@ -248,6 +253,7 @@ app.post('/rename-child-id/:oldChildId/:newChildId', async (req, res) => {
 });
 
 app.get('/twilio-token', (req, res) => {
+    // ... (seu código para /twilio-token permanece o mesmo)
     const { identity } = req.query;
 
     if (!identity) {
@@ -279,6 +285,7 @@ app.get('/twilio-token', (req, res) => {
 
 // --- ROTAS PARA STREAMING DE ÁUDIO ---
 app.post('/start-listening/:childId', (req, res) => {
+    // ... (seu código para /start-listening/:childId permanece o mesmo)
     const childId = req.params.childId;
     // Implementação temporária para encontrar a primeira conexão de pai
     wss.clients.forEach(client => {
@@ -300,6 +307,7 @@ app.post('/start-listening/:childId', (req, res) => {
 });
 
 app.post('/stop-listening/:childId', (req, res) => {
+    // ... (seu código para /stop-listening/:childId permanece o mesmo)
     const childId = req.params.childId;
     listeningParents.delete(childId);
     console.log(`Pai parou de ouvir o filho: ${childId}`);
@@ -317,6 +325,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/audio-stream' });
 
 wss.on('connection', ws => {
+    // ... (seu código para WebSocket permanece o mesmo)
     console.log('Novo cliente WebSocket conectado');
 
     ws.isParent = false;
@@ -390,4 +399,5 @@ server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
     console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key SID configurada via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
-    console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim
+    console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim' : 'Não'}`);
+});
