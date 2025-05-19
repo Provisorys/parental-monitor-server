@@ -4,6 +4,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const AWS = require('aws-sdk');
 const twilio = require('twilio'); // Importe a biblioteca do Twilio
+const http = require('http');
+const WebSocket = require('ws');
 
 const app = express();
 const PORT = process.env.PORT;
@@ -48,7 +50,7 @@ const upload = multer({
     limits: { fileSize: 20 * 1024 * 1024 }
 });
 
-// --- ROTA: /notifications ---
+// --- ROTAS DE API ---
 app.post('/notifications', async (req, res) => {
     const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber } = req.body;
     const timestampValue = timestamp || Date.now();
@@ -107,7 +109,6 @@ app.post('/notifications', async (req, res) => {
     }
 });
 
-// --- ROTA: /media ---
 app.post('/media', upload.single('file'), async (req, res) => {
     const { childId, type, timestamp, direction, contactOrGroup, phoneNumber } = req.body;
     const file = req.file;
@@ -178,7 +179,6 @@ app.post('/media', upload.single('file'), async (req, res) => {
     }
 });
 
-// --- ROTA: /get-conversations/:childId ---
 app.get('/get-conversations/:childId', async (req, res) => {
     const { childId } = req.params;
     if (!childId) return res.status(400).json({ message: 'childId é obrigatório' });
@@ -227,7 +227,6 @@ app.get('/get-conversations/:childId', async (req, res) => {
     }
 });
 
-// --- ROTA: /get-child-ids ---
 app.get('/get-child-ids', async (req, res) => {
     try {
         const data = await docClient.scan({
@@ -242,15 +241,12 @@ app.get('/get-child-ids', async (req, res) => {
     }
 });
 
-// --- ROTA: /rename-child-id (não implementada) ---
 app.post('/rename-child-id/:oldChildId/:newChildId', async (req, res) => {
     return res.status(501).json({
         message: 'Funcionalidade de renomear childId não está implementada'
     });
 });
 
-// --- NOVA ROTA: /twilio-token ---
-// Esta rota gera um token para o Twilio Video
 app.get('/twilio-token', (req, res) => {
     const { identity } = req.query;
 
@@ -281,6 +277,99 @@ app.get('/twilio-token', (req, res) => {
     }
 });
 
+// --- ROTAS PARA STREAMING DE ÁUDIO ---
+app.post('/start-listening/:childId', (req, res) => {
+    const childId = req.params.childId;
+    // Implementação temporária para encontrar a primeira conexão de pai
+    wss.clients.forEach(client => {
+        if (client.isParent) {
+            listeningParents.set(childId, client);
+            console.log(`Pai começou a ouvir o filho: ${childId}`);
+            res.sendStatus(200);
+            // Notificar o filho para começar a transmitir (via WebSocket)
+            wss.clients.forEach(childClient => {
+                if (childClient.clientId === childId && childClient.readyState === WebSocket.OPEN) {
+                    childClient.send(JSON.stringify({ type: 'START_AUDIO' }));
+                }
+            });
+        }
+    });
+    if (!listeningParents.has(childId)) {
+        res.status(400).send('Nenhum pai conectado para ouvir.');
+    }
+});
+
+app.post('/stop-listening/:childId', (req, res) => {
+    const childId = req.params.childId;
+    listeningParents.delete(childId);
+    console.log(`Pai parou de ouvir o filho: ${childId}`);
+    res.sendStatus(200);
+    // Opcional: Notificar o filho para parar de transmitir (via WebSocket)
+    wss.clients.forEach(childClient => {
+        if (childClient.clientId === childId && childClient.readyState === WebSocket.OPEN) {
+            childClient.send(JSON.stringify({ type: 'STOP_AUDIO' }));
+        }
+    });
+});
+
+// --- WEBSOCKET SERVER ---
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/audio-stream' });
+
+wss.on('connection', ws => {
+    console.log('Novo cliente WebSocket conectado');
+
+    ws.isParent = false;
+    ws.clientId = null;
+
+    ws.on('message', message => {
+        const messageString = message.toString();
+        console.log(`Mensagem WebSocket recebida: ${messageString}`);
+
+        if (messageString.startsWith('CHILD_ID:')) {
+            ws.clientId = messageString.substring('CHILD_ID:'.length);
+            console.log(`Filho conectado com ID: ${ws.clientId}`);
+            // Se houver um pai esperando para ouvir este filho, conecte-os (sinalizando via WebSocket)
+            if (listeningParents.has(ws.clientId)) {
+                ws.send(JSON.stringify({ type: 'START_AUDIO' }));
+            }
+        } else if (messageString.startsWith('PARENT_ID:')) {
+            ws.isParent = true;
+            console.log('Pai conectado');
+        } else if (ws.clientId && !ws.isParent) {
+            // Relay dos dados de áudio para o pai ouvinte
+            const parentWs = listeningParents.get(ws.clientId);
+            if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+                parentWs.send(message);
+            }
+        }
+    });
+
+    ws.on('close', () => {
+        console.log('Cliente WebSocket desconectado');
+        if (ws.clientId) {
+            listeningParents.forEach((parentWs, childId) => {
+                if (childId === ws.clientId) {
+                    listeningParents.delete(childId);
+                }
+            });
+            console.log(`Filho com ID ${ws.clientId} desconectado`);
+        } else if (ws.isParent) {
+            listeningParents.forEach((parentWs, childId) => {
+                if (parentWs === ws) {
+                    listeningParents.delete(childId);
+                }
+            });
+            console.log('Pai desconectado');
+        }
+    });
+
+    ws.on('error', error => {
+        console.error('Erro no WebSocket:', error);
+        // Lógica de tratamento de erro
+    });
+});
+
 // --- ERROS ---
 app.use((req, res) => {
     res.status(404).send('Rota não encontrada');
@@ -291,7 +380,7 @@ app.use((err, req, res, next) => {
 });
 
 // --- INICIO ---
-app.listen(PORT || 10000, '0.0.0.0', () => {
+server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     // Logs de inicialização das credenciais via variáveis de ambiente
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
@@ -300,6 +389,5 @@ app.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
     console.log(`Tabelas DynamoDB: Children=${DYNAMODB_TABLE_CHILDREN}, Messages=${DYNAMODB_TABLE_MESSAGES}, Conversations=${DYNAMODB_TABLE_CONVERSATIONS}`);
     console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
-    console.log(`Twilio API Key SID configurado via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
-    console.log(`Twilio API Key Secret configurado via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim' : 'Não'}`);
-});
+    console.log(`Twilio API Key SID configurada via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
+    console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim
