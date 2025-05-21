@@ -3,14 +3,14 @@ const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const AWS = require('aws-sdk');
-const twilio = require('twilio');
+const twilio = require('twilio'); // Twilio ainda está presente, mas não usaremos para o streaming direto via FFmpeg+Nginx
 const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const { spawn } = require('child_process'); // Importar child_process
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000; // Porta do seu servidor Node.js
 
 // --- AWS CONFIG ---
 AWS.config.update({
@@ -27,685 +27,322 @@ const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
-// --- TWILIO CONFIG ---
+// --- TWILIO CONFIG (Mantido, mas não será usado para streaming FFmpeg) ---
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
-const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// --- STREAMING CONFIG ---
-// A URL base para onde os streams de áudio serão servidos.
-// Se você estiver usando Nginx RTMP, seria algo como 'rtmp://seu-dominio.com/live/'
-// Se o próprio Node.js for servir os arquivos (mais complexo e pode exigir HTTP Live Streaming - HLS/DASH para clientes web),
-// então seria a URL do seu servidor.
-const STREAM_BASE_URL = process.env.STREAM_BASE_URL || 'http://localhost:8000/live/'; // Exemplo com Nginx RTMP
+// --- NGINX RTMP STREAMING CONFIG ---
+// A URL base para onde o FFmpeg publicará o stream RTMP.
+// Como o Nginx está no WSL e o Node.js pode estar no Windows, 'localhost' funciona.
+// Se o Node.js estivesse em outra máquina, seria o IP do Windows/Servidor.
+const FFMPEG_PUBLISH_RTMP_URL_BASE = process.env.FFMPEG_PUBLISH_RTMP_URL_BASE || 'rtmp://localhost:1935/live/';
 
-// --- MIDDLEWARES ---
-app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use((req, res, next) => {
-    console.log(`[HTTP_REQUEST] Requisição recebida: ${req.method} ${req.url}`);
-    next();
-});
+// A URL base que o cliente pai usará para consumir o stream via HTTP (HLS).
+// O cliente pai (seja um navegador no Windows ou um app Kodular no celular)
+// acessará o Nginx rodando no WSL via 'localhost' (se no mesmo PC) ou o IP do Windows.
+const CLIENT_STREAM_HTTP_URL_BASE = process.env.CLIENT_STREAM_HTTP_URL_BASE || 'http://localhost:8000/live/';
+const CLIENT_STREAM_FORMAT_EXTENSION = '.m3u8'; // Usando HLS. Altere para '.flv' se usar FLV direto.
 
-app.get('/', (req, res) => {
-    res.status(200).send('Servidor Parental Monitor rodando!');
-});
-
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 20 * 1024 * 1024 }
-});
-
-// --- ROTAS DE API (mantidas as existentes) ---
-app.post('/notifications', async (req, res) => {
-    const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber } = req.body;
-    const timestampValue = timestamp || Date.now();
-    const messageTypeString = messageType || 'TEXT_MESSAGE';
-
-    if (!childId || !message) {
-        console.warn('[NOTIFICATIONS] Erro: childId ou message faltando.');
-        return res.status(400).json({ message: 'childId e message são obrigatórios' });
-    }
-
-    const messageDirection = direction || (messageTypeString === "SENT" ? "sent" : messageTypeString === "RECEIVED" ? "received" : "unknown");
-    const contactOrGroupValue = contactOrGroup || 'unknown';
-    const phoneNumberValue = phoneNumber || 'unknown_number';
-
-    const messageItem = {
-        id: timestampValue + Math.floor(Math.random() * 1000),
-        childId,
-        message,
-        messageType: messageTypeString,
-        timestamp: timestampValue,
-        contactOrGroup: contactOrGroupValue,
-        phoneNumber: phoneNumberValue,
-        direction: messageDirection
-    };
-
-    try {
-        await docClient.put({
-            TableName: DYNAMODB_TABLE_MESSAGES,
-            Item: messageItem
-        }).promise();
-        console.log('[NOTIFICATIONS] Mensagem salva com sucesso no DynamoDB.');
-
-        console.log('[NOTIFICATIONS] Tentando atualizar conversa no DynamoDB:', { childId: childId, contactOrGroup: contactOrGroupValue });
-        await docClient.update({
-            TableName: DYNAMODB_TABLE_CONVERSATIONS,
-            Key: {
-                childId: childId,
-                contactOrGroup: contactOrGroupValue
-            },
-            UpdateExpression: 'SET #ts = :timestamp, #lm = :lastMessage, #pn = :phoneNumber, #dir = :direction',
-            ExpressionAttributeNames: {
-                "#ts": 'lastTimestamp',
-                "#lm": 'lastMessage',
-                "#pn": 'phoneNumber',
-                "#dir": 'lastDirection'
-            },
-            ExpressionAttributeValues: {
-                ':timestamp': timestampValue,
-                ':lastMessage': message,
-                ':phoneNumber': phoneNumberValue,
-                ':direction': messageDirection
-            }
-        }).promise();
-        console.log('[NOTIFICATIONS] Conversa atualizada com sucesso no DynamoDB.');
-
-        res.status(200).json({ message: 'Notificação recebida e salva com sucesso' });
-    } catch (error) {
-        console.error('[NOTIFICATIONS] Erro ao processar notificação:', error);
-        res.status(500).json({ message: 'Erro interno', error: error.message });
-    }
-});
-
-app.post('/media', upload.single('file'), async (req, res) => {
-    const { childId, type, timestamp, direction, contactOrGroup, phoneNumber } = req.body;
-    const file = req.file;
-    const timestampValue = timestamp || Date.now();
-
-    if (!file) {
-        console.warn('[MEDIA] Erro: Arquivo é obrigatório.');
-        return res.status(400).json({ message: 'Arquivo é obrigatório' });
-    }
-    if (!direction || !['sent', 'received'].includes(direction)) {
-        console.warn('[MEDIA] Erro: direction deve ser "sent" ou "received".');
-        return res.status(400).json({ message: 'direction deve ser "sent" ou "received"' });
-    }
-
-    const contactOrGroupValue = contactOrGroup || 'unknown';
-    const phoneNumberValue = phoneNumber || 'unknown_number';
-    const fileExtension = file.originalname ? `.${file.originalname.split('.').pop()}` : '';
-    const mediaId = timestampValue + Math.floor(Math.random() * 1000);
-    const s3Key = `media/${childId}/${mediaId}${fileExtension}`;
-
-    try {
-        await s3.upload({
-            Bucket: S3_BUCKET_NAME,
-            Key: s3Key,
-            Body: file.buffer,
-            ContentType: file.mimetype
-        }).promise();
-        console.log(`[MEDIA] Arquivo ${s3Key} enviado com sucesso para S3.`);
-
-        const messageItem = {
-            id: mediaId,
-            childId,
-            message: `Mídia (${type || file.mimetype})`,
-            messageType: type || file.mimetype,
-            timestamp: timestampValue,
-            contactOrGroup: contactOrGroupValue,
-            phoneNumber: phoneNumberValue,
-            direction,
-            s3Url: `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`
-        };
-
-        await docClient.put({
-            TableName: DYNAMODB_TABLE_MESSAGES,
-            Item: messageItem
-        }).promise();
-        console.log('[MEDIA] Entrada de mídia salva com sucesso no DynamoDB.');
-
-        await docClient.update({
-            TableName: DYNAMODB_TABLE_CONVERSATIONS,
-            Key: {
-                childId: childId,
-                contactOrGroup: contactOrGroupValue
-            },
-            UpdateExpression: 'SET #ts = :timestamp, #lm = :lastMessage, #pn = :phoneNumber, #dir = :direction',
-            ExpressionAttributeNames: {
-                '#ts': 'lastTimestamp',
-                '#lm': 'lastMessage',
-                '#pn': 'phoneNumber',
-                '#dir': 'lastDirection'
-            },
-            ExpressionAttributeValues: {
-                ':timestamp': timestampValue,
-                ':lastMessage': `Mídia (${type || file.mimetype})`,
-                ':phoneNumber': phoneNumberValue,
-                ':direction': direction
-            }
-        }).promise();
-        console.log('[MEDIA] Conversa atualizada com sucesso no DynamoDB para mídia.');
-
-        res.status(200).json({ message: 'Mídia recebida com sucesso', s3Url: messageItem.s3Url });
-
-    } catch (error) {
-        console.error('[MEDIA] Erro ao processar mídia:', error);
-        res.status(500).json({ message: 'Erro ao processar mídia', error: error.message });
-    }
-});
-
-app.get('/get-conversations/:childId', async (req, res) => {
-    const { childId } = req.params;
-    if (!childId) {
-        console.warn('[CONVERSATIONS] Erro: childId é obrigatório na requisição de conversas.');
-        return res.status(400).json({ message: 'childId é obrigatório' });
-    }
-
-    try {
-        console.log(`[CONVERSATIONS] Buscando conversas para childId: ${childId} na tabela ${DYNAMODB_TABLE_CONVERSATIONS}`);
-        const convData = await docClient.query({
-            TableName: DYNAMODB_TABLE_CONVERSATIONS,
-            KeyConditionExpression: 'childId = :cid',
-            ExpressionAttributeValues: {
-                ':cid': childId
-            }
-        }).promise();
-
-        console.log(`[CONVERSATIONS] Conversas encontradas para ${childId}: ${convData.Items.length} itens.`);
-
-        const groupedConversations = [];
-
-        for (const conv of convData.Items) {
-            console.log(`[CONVERSATIONS] Buscando mensagens para conversa: ${conv.contactOrGroup} (childId: ${childId})`);
-            const scanMessages = await docClient.scan({
-                TableName: DYNAMODB_TABLE_MESSAGES,
-                FilterExpression: 'childId = :cid AND contactOrGroup = :cog AND phoneNumber = :pn',
-                ExpressionAttributeValues: {
-                    ':cid': childId,
-                    ':cog': conv.contactOrGroup,
-                    ':pn': conv.phoneNumber
-                }
-            }).promise();
-
-            const messages = scanMessages.Items || [];
-            messages.sort((a, b) => b.timestamp - a.timestamp);
-            console.log(`[CONVERSATIONS] Mensagens encontradas para ${conv.contactOrGroup}: ${messages.length} itens.`);
-
-            groupedConversations.push({
-                contactOrGroup: conv.contactOrGroup,
-                phoneNumber: conv.phoneNumber,
-                lastTimestamp: conv.lastTimestamp,
-                lastMessage: conv.lastMessage,
-                lastDirection: conv.lastDirection,
-                messages
-            });
-        }
-
-        groupedConversations.sort((a, b) => b.lastTimestamp - a.lastTimestamp);
-        res.status(200).json(groupedConversations);
-
-    } catch (error) {
-        console.error('[CONVERSATIONS] Erro ao buscar conversas:', error);
-        res.status(500).json({ message: 'Erro ao buscar conversas', error: error.message });
-    }
-});
-
-app.get('/get-child-ids', async (req, res) => {
-    try {
-        console.log(`[CHILD_IDS] Tentando escanear child IDs na tabela ${DYNAMODB_TABLE_CONVERSATIONS} do DynamoDB.`);
-        const data = await docClient.scan({
-            TableName: DYNAMODB_TABLE_CONVERSATIONS,
-            ProjectionExpression: 'childId',
-        }).promise();
-
-        const childIds = [...new Set(data.Items.map(item => item.childId))];
-        console.log('[CHILD_IDS] childIDs encontrados no DynamoDB (GET /get-child-ids):', childIds);
-
-        res.status(200).json(childIds);
-    } catch (error) {
-        console.error('[CHILD_IDS] Erro ao listar child IDs:', error);
-        res.status(500).json({ message: 'Erro ao listar child IDs', error: error.message });
-    }
-});
-
-app.post('/rename-child-id/:oldChildId/:newChildId', async (req, res) => {
-    return res.status(501).json({
-        message: 'Funcionalidade de renomear childId não está implementada.'
-    });
-});
-
-app.get('/twilio-token', (req, res) => {
-    const { identity } = req.query;
-
-    if (!identity) {
-        console.warn('[TWILIO] Erro: A identidade (identity) é obrigatória para o token Twilio.');
-        return res.status(400).send('A identidade (identity) é obrigatória.');
-    }
-
-    try {
-        const accessToken = new twilio.jwt.AccessToken(
-            TWILIO_ACCOUNT_SID,
-            TWILIO_API_KEY_SID,
-            TWILIO_API_KEY_SECRET,
-            { identity: identity }
-        );
-
-        const grant = new twilio.jwt.AccessToken.VideoGrant();
-        accessToken.addGrant(grant);
-
-        res.json({ token: accessToken.toJwt() });
-
-        console.log(`[TWILIO] Token Twilio gerado para identidade: ${identity}`);
-    } catch (error) {
-        console.error('[TWILIO] Erro ao gerar token Twilio:', error);
-        res.status(500).json({ error: 'Erro ao gerar token Twilio', details: error.message });
-    }
-});
-
-app.post('/start-microphone', async (req, res) => {
-    const { childId } = req.body;
-
-    if (!childId) {
-        console.warn('[HTTP_CMD] Erro: childId não fornecido na requisição /start-microphone.');
-        return res.status(400).json({ message: 'childId é obrigatório.' });
-    }
-
-    console.log(`[HTTP_CMD] Recebida requisição POST /start-microphone para o filho: ${childId}`);
-
-    const childWs = findChildWebSocket(childId);
-
-    if (childWs) {
-        try {
-            const command = JSON.stringify({ type: 'START_AUDIO' });
-            childWs.send(command);
-            console.log(`[HTTP_CMD] Comando '${command}' enviado via WebSocket para o filho: ${childId}`);
-            res.status(200).json({ message: `Comando START_AUDIO enviado para ${childId}.` });
-        } catch (error) {
-            console.error(`[HTTP_CMD] Erro ao enviar comando START_AUDIO via WebSocket para ${childId}:`, error);
-            res.status(500).json({ message: 'Erro ao enviar comando para o filho.', error: error.message });
-        }
-    } else {
-        console.warn(`[HTTP_CMD] ERRO: Nenhuma conexão WebSocket ativa encontrada para o filho: ${childId}. O comando START_AUDIO NÃO PODE ser enviado.`);
-        res.status(404).json({ message: `Filho ${childId} não está conectado via WebSocket.` });
-    }
-});
-
-app.post('/stop-microphone', async (req, res) => {
-    const { childId } = req.body;
-
-    if (!childId) {
-        console.warn('[HTTP_CMD] Erro: childId não fornecido na requisição /stop-microphone.');
-        return res.status(400).json({ message: 'childId é obrigatório.' });
-    }
-
-    console.log(`[HTTP_CMD] Recebida requisição POST /stop-microphone para o filho: ${childId}`);
-
-    const childWs = findChildWebSocket(childId);
-
-    if (childWs) {
-        try {
-            const command = JSON.stringify({ type: 'STOP_AUDIO' });
-            childWs.send(command);
-            console.log(`[HTTP_CMD] Comando '${command}' enviado via WebSocket para o filho: ${childId}`);
-            res.status(200).json({ message: `Comando STOP_AUDIO enviado para ${childId}.` });
-        } catch (error) {
-            console.error(`[HTTP_CMD] Erro ao enviar comando STOP_AUDIO via WebSocket para ${childId}:`, error);
-            res.status(500).json({ message: 'Erro ao enviar comando para o filho.', error: error.message });
-        }
-    } else {
-        console.warn(`[HTTP_CMD] ERRO: Nenhuma conexão WebSocket ativa encontrada para o filho: ${childId}. O comando STOP_AUDIO NÃO PODE ser enviado.`);
-        res.status(404).json({ message: `Filho ${childId} não está conectado via WebSocket.` });
-    }
-});
-
-
-// --- WEBSOCKET SERVER ---
+// --- WEB SOCKETS ---
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/audio-stream' });
+const wss = new WebSocket.Server({ server });
 
-const parentListeningSockets = new Map(); // Mapa: childId -> WebSocket do pai que está ouvindo
-const activeChildWebSockets = new Map(); // Mapa: childId -> WebSocket do filho ativo
-const ffmpegProcesses = new Map(); // Mapa: childId -> Processo FFmpeg
+const childConnections = new Map(); // childId -> { ws: WebSocket, ffmpegProcess: ChildProcess, currentParentWs: WebSocket }
+const parentConnections = new Map(); // parentId -> { ws: WebSocket, activeChildStreamUrl: string }
 
-// --- FUNÇÃO AUXILIAR PARA WEBSOCKETS ---
-function findChildWebSocket(childId) {
-    const targetClient = activeChildWebSockets.get(childId);
-    console.log(`[WS_FIND] Buscando WebSocket para childId: ${childId}. Estado atual do mapa activeChildWebSockets: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
-    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-        console.log(`[WS_FIND] WebSocket ENCONTRADO e ABERTO para childId: ${childId}`);
-        return targetClient;
-    }
-    console.log(`[WS_FIND] WebSocket NÃO ENCONTRADO ou FECHADO para childId: ${childId}. readyState: ${targetClient ? targetClient.readyState : 'N/A'}`);
-    return null;
-}
+const ffmpegProcesses = new Map(); // childId -> { ffmpegProcess: ChildProcess, buffer: Buffer[] }
 
+// Função para iniciar o stream FFmpeg
 /**
- * Inicia um processo FFmpeg para receber áudio de um filho e retransmiti-lo.
+ * Inicia um processo FFmpeg para receber áudio de um filho e retransmiti-lo para Nginx RTMP.
  * @param {string} childId - O ID do filho que está transmitindo.
- * @param {WebSocket} childWs - O WebSocket do filho.
- * @returns {string} A URL do stream para o pai.
+ * @param {WebSocket} childWs - O WebSocket do filho (para ler os dados).
+ * @returns {string} A URL do stream HLS para o pai.
  */
 function startFfmpegStream(childId, childWs) {
     if (ffmpegProcesses.has(childId)) {
         console.warn(`[FFMPEG] Processo FFmpeg já existe para ${childId}. Não iniciando um novo.`);
-        return `${STREAM_BASE_URL}${childId}.flv`; // Retorna a URL existente
+        // Retorna a URL do stream existente
+        return `${CLIENT_STREAM_HTTP_URL_BASE}${childId}${CLIENT_STREAM_FORMAT_EXTENSION}`;
     }
 
-    // A URL de saída para o stream. Ex: rtmp://localhost/live/childId
-    // Ou, se for servir diretamente via Node.js, seria um arquivo temporário
-    const streamOutputUrl = `${STREAM_BASE_URL}${childId}.flv`; // Exemplo para Nginx RTMP
+    // A URL RTMP para o FFmpeg publicar no Nginx
+    const rtmpPublishUrl = `${FFMPEG_PUBLISH_RTMP_URL_BASE}${childId}`;
 
-    // Argumentos do FFmpeg:
-    // -i pipe:0: Lê a entrada do stdin (do WebSocket)
-    // -f s16le: Formato de áudio (assumindo PCM 16-bit little-endian do cliente)
-    // -ar 44100: Taxa de amostragem
-    // -ac 1: Canais de áudio (mono)
-    // -c:a aac: Codec de áudio de saída (AAC)
-    // -b:a 64k: Bitrate do áudio de saída
-    // -f flv: Formato de contêiner de saída (FLV é comum para RTMP)
-    // <streamOutputUrl>: A URL de saída (ex: RTMP URL)
+    // A URL HTTP para o cliente pai consumir (HLS)
+    const clientStreamUrl = `${CLIENT_STREAM_HTTP_URL_BASE}${childId}${CLIENT_STREAM_FORMAT_EXTENSION}`;
 
-    // Nota: Os parâmetros de entrada (-f s16le -ar 44100 -ac 1) devem corresponder exatamente ao formato de áudio
-    // que o aplicativo do filho está enviando via WebSocket.
-    // Para WebM/Opus, os argumentos seriam diferentes.
-    // Ex: ['-i', 'pipe:0', '-c:a', 'copy', '-f', 'flv', streamOutputUrl] se o cliente enviar WebM/Opus.
-    // Se o cliente enviar apenas bytes brutos de áudio (PCM), os argumentos abaixo são mais adequados.
+    console.log(`[FFMPEG] Tentando iniciar processo FFmpeg para ${childId}`);
+    console.log(`[FFMPEG] Publicando em RTMP: ${rtmpPublishUrl}`);
+    console.log(`[FFMPEG] URL HLS para o pai: ${clientStreamUrl}`);
+
+    // Argumentos do FFmpeg.
+    // Presumindo que o cliente está enviando áudio PCM bruto (raw audio).
+    // Se o Kodular pode enviar Opus ou outro formato, podemos otimizar isso.
     const ffmpegArgs = [
-        '-i', 'pipe:0',         // Entrada do stdin
-        '-f', 's16le',          // Formato de áudio raw (16-bit signed, little-endian)
-        '-ar', '44100',          // Taxa de amostragem
-        '-ac', '1',             // Canais de áudio (mono)
-        '-c:a', 'aac',          // Codec de áudio de saída (AAC)
-        '-b:a', '64k',          // Bitrate do áudio de saída
-        '-f', 'flv',            // Formato de contêiner de saída (FLV para RTMP)
-        streamOutputUrl
+        '-i', 'pipe:0',         // Entrada do stdin (do WebSocket)
+        '-f', 's16le',          // Formato de áudio raw: 16-bit signed, little-endian
+        '-ar', '44100',         // Taxa de amostragem: 44.1 kHz (comum para áudio)
+        '-ac', '1',             // Canais de áudio: 1 (mono)
+        '-c:a', 'aac',          // Codec de áudio de saída: AAC (boa qualidade e compatibilidade)
+        '-b:a', '64k',          // Bitrate do áudio de saída: 64 kbps (pode ser ajustado)
+        '-f', 'flv',            // Formato de contêiner de saída: FLV para RTMP
+        rtmpPublishUrl          // A URL RTMP de saída para o Nginx
     ];
-
-    console.log(`[FFMPEG] Iniciando processo FFmpeg para ${childId} com argumentos: ${ffmpegArgs.join(' ')}`);
 
     const ffmpeg = spawn('ffmpeg', ffmpegArgs);
 
-    ffmpegProcesses.set(childId, ffmpeg);
+    // Armazena o processo FFmpeg e um buffer para dados
+    ffmpegProcesses.set(childId, { ffmpegProcess: ffmpeg, buffer: [] });
 
-    ffmpeg.stdin.on('error', (err) => {
-        console.error(`[FFMPEG_ERROR] Erro no stdin do FFmpeg para ${childId}: ${err.message}`);
+    // Lidar com dados recebidos do WebSocket do filho e enviá-los para o stdin do FFmpeg
+    childWs.on('message', (message) => {
+        // Certifique-se de que a mensagem é um Buffer (dados binários)
+        if (typeof message === 'object' && message instanceof Buffer) {
+            if (ffmpeg.stdin.writable) {
+                ffmpeg.stdin.write(message);
+            } else {
+                // Se o stdin não estiver mais gravável, podemos querer armazenar em buffer
+                // ou logar um erro, dependendo do comportamento desejado.
+                // console.warn(`[FFMPEG] stdin não gravável para ${childId}. Bufferizando.`);
+                ffmpegProcesses.get(childId)?.buffer.push(message);
+            }
+        }
     });
 
     ffmpeg.stderr.on('data', (data) => {
-        console.log(`[FFMPEG_LOG] FFmpeg para ${childId} (stderr): ${data.toString()}`);
+        // FFmpeg imprime informações de status e erros no stderr
+        console.error(`[FFMPEG][${childId}] stderr: ${data}`);
     });
 
     ffmpeg.on('close', (code) => {
-        console.log(`[FFMPEG_CLOSE] Processo FFmpeg para ${childId} encerrado com código ${code}`);
-        ffmpegProcesses.delete(childId); // Remove do mapa ao encerrar
+        console.log(`[FFMPEG][${childId}] Processo FFmpeg finalizado com código ${code}`);
+        if (ffmpegProcesses.has(childId)) {
+            const { ffmpegProcess, buffer } = ffmpegProcesses.get(childId);
+            ffmpegProcess.stdin.end(); // Fechar o stdin
+            ffmpegProcesses.delete(childId);
+
+            // Notificar pais que estão ouvindo que o stream terminou (opcional, pode ser via WebSocket)
+            parentConnections.forEach((conn, parentId) => {
+                if (conn.activeChildStreamUrl === clientStreamUrl) {
+                    // Enviar uma mensagem para o pai que o stream parou
+                    console.log(`[WS] Notificando pai ${parentId} que o stream de ${childId} parou.`);
+                    conn.ws.send(JSON.stringify({ type: 'stream_ended', childId: childId }));
+                    conn.activeChildStreamUrl = null; // Limpar a URL ativa
+                }
+            });
+        }
     });
 
     ffmpeg.on('error', (err) => {
-        console.error(`[FFMPEG_ERROR] Erro ao spawnar FFmpeg para ${childId}: ${err.message}`);
-        ffmpegProcesses.delete(childId); // Remove do mapa em caso de erro
+        console.error(`[FFMPEG][${childId}] Erro no processo FFmpeg: ${err}`);
+        if (ffmpegProcesses.has(childId)) {
+            ffmpegProcesses.delete(childId);
+        }
     });
 
-    return streamOutputUrl;
+    return clientStreamUrl; // Retorna a URL HLS para o cliente pai
 }
 
-/**
- * Encerra um processo FFmpeg existente.
- * @param {string} childId - O ID do filho cujo processo FFmpeg deve ser encerrado.
- */
-function stopFfmpegStream(childId) {
-    const ffmpeg = ffmpegProcesses.get(childId);
-    if (ffmpeg) {
-        console.log(`[FFMPEG] Encerrando processo FFmpeg para ${childId}`);
-        ffmpeg.kill('SIGINT'); // Envia sinal de interrupção para o FFmpeg
-        ffmpegProcesses.delete(childId);
-    } else {
-        console.log(`[FFMPEG] Nenhum processo FFmpeg ativo encontrado para ${childId} para encerrar.`);
+// Rota para receber dados do filho
+app.post('/api/child_data', async (req, res) => {
+    // ... sua lógica para autenticação do filho e obtenção do childId
+    // Esta rota parece ser para dados REST, não para streaming de áudio
+    console.warn('[HTTP] Rota /api/child_data chamada (esta rota é para dados, não áudio stream)');
+    res.status(200).send('OK');
+});
+
+// Endpoint WebSocket para o filho enviar áudio
+wss.on('connection', (ws, req) => {
+    const childId = req.url.slice(1); // Assume que a URL é "/childId"
+    if (!childId) {
+        console.error('[WS] Conexão WebSocket de filho sem ID.');
+        ws.close(1008, 'ID do filho ausente');
+        return;
     }
-}
 
-wss.on('connection', ws => {
-    ws.id = uuidv4();
-    console.log(`[WS_CONNECT] Novo cliente WebSocket conectado. ID da conexão: ${ws.id}. Total de conexões ativas: ${wss.clients.size}`);
+    console.log(`[WS] Filho ${childId} conectado.`);
 
-    ws.isParent = false;
-    ws.clientId = null;
-    ws.parentId = null;
+    childConnections.set(childId, { ws: ws, ffmpegProcess: null, currentParentWs: null });
 
-    ws.on('message', message => {
-        const messageOrigin = ws.clientId ? `Filho ${ws.clientId} (Conexão ${ws.id})` : (ws.parentId ? `Pai ${ws.parentId} (Conexão ${ws.id})` : `Conexão ${ws.id}`);
+    // Inicia o processo FFmpeg para este filho
+    const streamUrlForParent = startFfmpegStream(childId, ws);
 
-        let processedAsText = false;
+    // Associa o processo FFmpeg à conexão do filho
+    childConnections.get(childId).ffmpegProcess = ffmpegProcesses.get(childId).ffmpegProcess;
 
-        if (typeof message === 'string') {
-            const messageString = message.toString();
-            const displayMessage = messageString.length > 100 ? messageString.substring(0, 100) + '...' : messageString;
-            console.log(`[WS_MSG] [${messageOrigin}] Mensagem WebSocket de TEXTO recebida: "${displayMessage}"`);
-
-            if (messageString.startsWith('CHILD_ID:')) {
-                ws.clientId = messageString.substring('CHILD_ID:'.length);
-                ws.isParent = false;
-                activeChildWebSockets.set(ws.clientId, ws);
-                console.log(`[WS_MSG] [Conexão ${ws.id}] Filho conectado e ID "${ws.clientId}" registrado. Mapa activeChildWebSockets após adição: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
-
-                const parentWs = parentListeningSockets.get(ws.clientId);
-                if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                    console.log(`[WS_MSG] [Conexão ${ws.id}] Filho ${ws.clientId} se conectou. Pai (ID: ${parentWs.parentId || 'desconhecido'}) já está ouvindo. Enviando START_AUDIO.`);
-                    ws.send(JSON.stringify({ type: 'START_AUDIO' }));
-                    // Se o pai já está ouvindo, inicia o stream e envia a URL
-                    const streamUrl = startFfmpegStream(ws.clientId, ws);
-                    parentWs.send(JSON.stringify({ type: 'STREAM_URL', url: streamUrl }));
-                    console.log(`[WS_MSG] [Conexão ${ws.id}] URL do stream (${streamUrl}) enviada para o pai de ${ws.clientId}.`);
-                } else {
-                    console.log(`[WS_MSG] [Conexão ${ws.id}] Filho ${ws.clientId} conectado, mas nenhum pai está ouvindo ativamente neste momento.`);
-                }
-                processedAsText = true;
-            } else if (messageString.startsWith('PARENT_ID:')) {
-                ws.isParent = true;
-                ws.parentId = messageString.substring('PARENT_ID:'.length);
-                console.log(`[WS_MSG] [Conexão ${ws.id}] Pai conectado com ID: ${ws.parentId || 'desconhecido'}`);
-                processedAsText = true;
-            } else if (messageString.startsWith('LISTEN_TO_CHILD:')) {
-                if (ws.isParent) {
-                    const targetChildId = messageString.substring('LISTEN_TO_CHILD:'.length);
-                    parentListeningSockets.set(targetChildId, ws);
-                    console.log(`[WS_MSG] [Conexão ${ws.id}] Pai (ID: ${ws.parentId || 'desconhecido'}) está agora ouvindo o filho: ${targetChildId}. Mapa parentListeningSockets: [${Array.from(parentListeningSockets.keys()).join(', ')}]`);
-
-                    const childWs = findChildWebSocket(targetChildId);
-                    if (childWs) {
-                        childWs.send(JSON.stringify({ type: 'START_AUDIO' }));
-                        console.log(`[WS_MSG] [Conexão ${ws.id}] Sinal START_AUDIO enviado para o filho ${targetChildId} via WebSocket (pedido de escuta do pai).`);
-
-                        // INICIA O STREAM FFmpeg E ENVIA A URL PARA O PAI
-                        const streamUrl = startFfmpegStream(targetChildId, childWs);
-                        ws.send(JSON.stringify({ type: 'STREAM_URL', url: streamUrl }));
-                        console.log(`[WS_MSG] [Conexão ${ws.id}] URL do stream (${streamUrl}) enviada para o pai ${ws.parentId || 'desconhecido'}.`);
-                    } else {
-                        console.log(`[WS_MSG] [Conexão ${ws.id}] Filho ${targetChildId} não encontrado no mapa activeChildWebSockets, mas pai (ID: ${ws.parentId || 'desconhecido'}) está esperando.`);
-                        ws.send(JSON.stringify({ type: 'STATUS', message: `Filho ${targetChildId} não está online. Tentando ouvir, mas sem áudio.` }));
-                    }
-                    ws.send(JSON.stringify({ type: 'STATUS', message: `Você está ouvindo ${targetChildId}` }));
-                } else {
-                    ws.send(JSON.stringify({ type: 'ERROR', message: 'Comando de escuta apenas para pais.' }));
-                    console.warn(`[WS_MSG] [Conexão ${ws.id}] Tentativa de comando LISTEN_TO_CHILD de um cliente não-pai. Mensagem: ${messageString}`);
-                }
-                processedAsText = true;
-            } else if (messageString.startsWith('STOP_LISTENING_TO_CHILD:')) {
-                if (ws.isParent) {
-                    const targetChildId = messageString.substring('STOP_LISTENING_TO_CHILD:'.length);
-                    if (parentListeningSockets.has(targetChildId) && parentListeningSockets.get(targetChildId) === ws) {
-                        parentListeningSockets.delete(targetChildId);
-                        console.log(`[WS_MSG] [Conexão ${ws.id}] Pai (ID: ${ws.parentId || 'desconhecido'}) parou de ouvir o filho: ${targetChildId}. Mapa parentListeningSockets: [${Array.from(parentListeningSockets.keys()).join(', ')}]`);
-
-                        let anotherParentListening = false;
-                        for (const [childIdInMap, parentWsInMap] of parentListeningSockets.entries()) {
-                            if (childIdInMap === targetChildId && parentWsInMap.readyState === WebSocket.OPEN) {
-                                anotherParentListening = true;
-                                break;
-                            }
-                        }
-
-                        if (!anotherParentListening) {
-                            const childWs = findChildWebSocket(targetChildId);
-                            if (childWs) {
-                                childWs.send(JSON.stringify({ type: 'STOP_AUDIO' }));
-                                console.log(`[WS_MSG] [Conexão ${ws.id}] Sinal STOP_AUDIO enviado para o filho ${targetChildId} (nenhum pai mais ouvindo).`);
-                            }
-                            stopFfmpegStream(targetChildId); // Encerra o processo FFmpeg
-                        }
-                        ws.send(JSON.stringify({ type: 'STATUS', message: `Você parou de ouvir ${targetChildId}` }));
-                    } else {
-                        ws.send(JSON.stringify({ type: 'ERROR', message: 'Você não estava ouvindo este filho.' }));
-                        console.warn(`[WS_MSG] [Conexão ${ws.id}] Pai tentou parar de ouvir ${targetChildId} mas não estava registrado como ouvinte.`);
-                    }
-                } else {
-                    ws.send(JSON.stringify({ type: 'ERROR', message: 'Comando de parada de escuta apenas para pais.' }));
-                    console.warn(`[WS_MSG] [Conexão ${ws.id}] Tentativa de comando STOP_LISTENING_TO_CHILD de um cliente não-pai. Mensagem: ${messageString}`);
-                }
-                processedAsText = true;
-            } else if (ws.isParent && messageString.startsWith('COMMAND:')) {
-                const command = messageString.substring('COMMAND:'.length);
-                console.log(`[WS_MSG] [${messageOrigin}] Comando de pai recebido: ${command}`);
-                processedAsText = true;
-            } else {
-                console.warn(`[WS_MSG] [${messageOrigin}] Mensagem de texto desconhecida ou inesperada: ${displayMessage}`);
-                ws.send(JSON.stringify({ type: 'ERROR', message: 'Comando de texto desconhecido ou não permitido.' }));
-                processedAsText = true;
+    ws.on('close', () => {
+        console.log(`[WS] Filho ${childId} desconectado.`);
+        if (childConnections.has(childId)) {
+            const { ffmpegProcess } = childConnections.get(childId);
+            if (ffmpegProcess && !ffmpegProcess.killed) {
+                console.log(`[FFMPEG] Matando processo FFmpeg para ${childId} devido à desconexão do filho.`);
+                ffmpegProcess.kill('SIGKILL'); // Força a interrupção do FFmpeg
             }
-        }
-
-        // Se não foi processada como string, e é um Buffer/ArrayBuffer, assume que é áudio
-        if (!processedAsText && (message instanceof Buffer || message instanceof ArrayBuffer)) {
-            // Se já tiver um clientId (é um filho) e não for um pai, encaminha para o FFmpeg
-            if (ws.clientId && !ws.isParent) {
-                const ffmpeg = ffmpegProcesses.get(ws.clientId);
-                if (ffmpeg && ffmpeg.stdin.writable) {
-                    try {
-                        ffmpeg.stdin.write(message); // Escreve os bytes de áudio para o stdin do FFmpeg
-                        // console.log(`[WS_MSG] [${messageOrigin}] Bytes de áudio (${message.length} bytes) encaminhados para FFmpeg.`);
-                    } catch (e) {
-                        console.error(`[FFMPEG_WRITE_ERROR] Erro ao escrever para o stdin do FFmpeg para ${ws.clientId}: ${e.message}`);
-                        // Considerar parar o stream e notificar o pai se o FFmpeg falhar
-                    }
-                } else {
-                    // console.log(`[WS_MSG] [${messageOrigin}] FFmpeg não está pronto ou não existe para o filho ${ws.clientId}. Descartando ${message.length} bytes de áudio.`);
-                }
-            } else {
-                console.warn(`[WS_MSG] [${messageOrigin}] Mensagem binária recebida inesperada (não é de filho ou não é áudio). Tamanho: ${message.length} bytes.`);
-            }
-        } else if (!processedAsText) {
-            console.warn(`[WS_MSG] [${messageOrigin}] Mensagem recebida não é string nem binária esperada. Tipo: ${typeof message}, Tamanho: ${message ? message.length : 'N/A'}`);
+            ffmpegProcesses.delete(childId); // Garante que também é removido do map de processos
+            childConnections.delete(childId);
         }
     });
 
-    ws.on('close', (code, reason) => {
-        const messageOrigin = ws.clientId ? `Filho ${ws.clientId} (Conexão ${ws.id})` : (ws.parentId ? `Pai ${ws.parentId} (Conexão ${ws.id})` : `Conexão ${ws.id}`);
-        console.log(`[WS_CLOSE] [${messageOrigin}] Cliente WebSocket desconectado. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}. Total de conexões ativas: ${wss.clients.size - 1}`);
-
-        if (ws.clientId) {
-            console.log(`[WS_CLOSE] [${messageOrigin}] Tentando remover Filho com ID ${ws.clientId} do mapa activeChildWebSockets.`);
-            activeChildWebSockets.delete(ws.clientId);
-            console.log(`[WS_CLOSE] [${messageOrigin}] Filho com ID ${ws.clientId} removido. Mapa activeChildWebSockets após remoção: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
-
-            // Encerra o processo FFmpeg quando o filho se desconecta
-            stopFfmpegStream(ws.clientId);
-
-            let hadActiveParent = false;
-            for (const [childIdInMap, parentWsInMap] of parentListeningSockets.entries()) {
-                if (childIdInMap === ws.clientId && parentWsInMap.readyState === WebSocket.OPEN) {
-                    parentWsInMap.send(JSON.stringify({ type: 'CHILD_DISCONNECTED', childId: ws.clientId }));
-                    console.log(`[WS_CLOSE] [${parentWsInMap.id}] Sinal CHILD_DISCONNECTED enviado para o pai ouvindo ${ws.clientId}.`);
-                    parentListeningSockets.delete(childIdInMap);
-                    hadActiveParent = true;
-                }
+    ws.on('error', (error) => {
+        console.error(`[WS] Erro no WebSocket do filho ${childId}:`, error);
+        if (childConnections.has(childId)) {
+            const { ffmpegProcess } = childConnections.get(childId);
+            if (ffmpegProcess && !ffmpegProcess.killed) {
+                console.log(`[FFMPEG] Matando processo FFmpeg para ${childId} devido a erro no WebSocket.`);
+                ffmpegProcess.kill('SIGKILL');
             }
-            if (hadActiveParent) {
-                console.log(`[WS_CLOSE] [${messageOrigin}] Removida a escuta de pais para o filho desconectado ${ws.clientId}.`);
-            }
-        } else if (ws.isParent && ws.parentId) {
-            console.log(`[WS_CLOSE] [${messageOrigin}] Pai com ID ${ws.parentId} desconectado.`);
-            for (const [childIdBeingListened, parentWsListening] of parentListeningSockets.entries()) {
-                if (parentWsListening === ws) {
-                    parentListeningSockets.delete(childIdBeingListened);
-                    console.log(`[WS_CLOSE] [${messageOrigin}] Pai ${ws.parentId} parou de ouvir o filho: ${childIdBeingListened}.`);
-
-                    let anotherParentStillListening = false;
-                    for (const [cId, pWs] of parentListeningSockets.entries()) {
-                        if (cId === childIdBeingListened && pWs.readyState === WebSocket.OPEN) {
-                            anotherParentStillListening = true;
-                            break;
-                        }
-                    }
-
-                    if (!anotherParentStillListening) {
-                        const childWs = findChildWebSocket(childIdBeingListened);
-                        if (childWs) {
-                            childWs.send(JSON.stringify({ type: 'STOP_AUDIO' }));
-                            console.log(`[WS_CLOSE] [Conexão ${childWs.id}] Sinal STOP_AUDIO enviado para o filho ${childIdBeingListened} (nenhum pai mais ouvindo após desconexão).`);
-                        }
-                        stopFfmpegStream(childIdBeingListened); // Encerra o processo FFmpeg
-                    }
-                }
-            }
-        } else {
-            console.log(`[WS_CLOSE] [Conexão ${ws.id}] Cliente WebSocket desconectado sem ID de filho ou pai.`);
-        }
-    });
-
-    ws.on('error', error => {
-        const messageOrigin = ws.clientId ? `Filho ${ws.clientId} (Conexão ${ws.id})` : (ws.parentId ? `Pai ${ws.parentId} (Conexão ${ws.id})` : `Conexão ${ws.id}`);
-        console.error(`[WS_ERROR] [${messageOrigin}] Erro no WebSocket:`, error);
-
-        if (ws.clientId) {
-            console.log(`[WS_ERROR] [${messageOrigin}] Tentando remover Filho com ID ${ws.clientId} do mapa activeChildWebSockets devido a um erro.`);
-            activeChildWebSockets.delete(ws.clientId);
-            console.log(`[WS_ERROR] [${messageOrigin}] Filho com ID ${ws.clientId} removido. Mapa activeChildWebSockets após remoção: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
-
-            stopFfmpegStream(ws.clientId); // Encerra o processo FFmpeg
-            for (const [childIdInMap, parentWsInMap] of parentListeningSockets.entries()) {
-                if (childIdInMap === ws.clientId && parentWsInMap.readyState === WebSocket.OPEN) {
-                    parentWsInMap.send(JSON.stringify({ type: 'CHILD_DISCONNECTED', childId: ws.clientId }));
-                    console.log(`[WS_ERROR] [${parentWsInMap.id}] Sinal CHILD_DISCONNECTED enviado para o pai ouvindo ${ws.clientId} devido a um erro.`);
-                    parentListeningSockets.delete(childIdInMap);
-                }
-            }
-        } else if (ws.isParent && ws.parentId) {
-           for (const [childIdBeingListened, parentWsListening] of parentListeningSockets.entries()) {
-               if (parentWsListening === ws) {
-                   parentListeningSockets.delete(childIdBeingListened);
-                   console.log(`[WS_ERROR] [${messageOrigin}] Pai ${ws.parentId} removido do mapa de ouvintes para ${childIdBeingListened} devido a um erro.`);
-
-                   let anotherParentStillListening = false;
-                   for (const [cId, pWs] of parentListeningSockets.entries()) {
-                       if (cId === childIdBeingListened && pWs.readyState === WebSocket.OPEN) {
-                           anotherParentStillListening = true;
-                           break;
-                       }
-                   }
-                   if (!anotherParentStillListening) {
-                       const childWs = findChildWebSocket(childIdBeingListened);
-                       if (childWs) {
-                           childWs.send(JSON.stringify({ type: 'STOP_AUDIO' }));
-                           console.log(`[WS_ERROR] [Conexão ${childWs.id}] Sinal STOP_AUDIO enviado para o filho ${childIdBeingListened} (nenhum pai mais ouvindo após erro).`);
-                       }
-                       stopFfmpegStream(childIdBeingListened); // Encerra o processo FFmpeg
-                   }
-               }
-           }
+            ffmpegProcesses.delete(childId);
+            childConnections.delete(childId);
         }
     });
 });
 
-// Inicia o servidor HTTP e WebSocket
-server.listen(PORT, () => {
-    console.log(`Servidor Parental Monitor ouvindo na porta ${PORT}`);
+// Endpoint WebSocket para o pai solicitar o stream de um filho
+app.ws('/parent', (ws, req) => { // Usando app.ws do express-ws, se estiver usando ele
+    // Ou usando wss.on('connection') se não estiver usando express-ws
 });
 
-// --- ERROS ---
+// Exemplo de como um pai solicitaria um stream (isso deve ser adaptado ao seu frontend)
+// Isso é uma simulação, você precisará de uma API real para isso.
+app.post('/api/start_listening', async (req, res) => {
+    const { parentId, childId } = req.body; // Supondo que você envia parentId e childId no corpo
+    if (!parentId || !childId) {
+        return res.status(400).json({ success: false, message: 'ID do pai e do filho são obrigatórios.' });
+    }
+
+    console.log(`[API] Pai ${parentId} solicitou stream do filho ${childId}.`);
+
+    const childConn = childConnections.get(childId);
+    if (!childConn || !childConn.ffmpegProcess) {
+        // Child not connected or FFmpeg not running
+        return res.status(404).json({ success: false, message: 'Filho não conectado ou stream não disponível.' });
+    }
+
+    // A URL do stream para o pai é a que o FFmpeg está publicando via Nginx
+    const streamUrl = `${CLIENT_STREAM_HTTP_URL_BASE}${childId}${CLIENT_STREAM_FORMAT_EXTENSION}`;
+
+    // Atualiza a conexão do pai com a URL do stream ativa
+    parentConnections.set(parentId, { ws: null, activeChildStreamUrl: streamUrl }); // ws: null porque este é um endpoint HTTP
+
+    // Envia a URL do stream de volta para o pai
+    res.json({ success: true, streamUrl: streamUrl, childId: childId });
+});
+
+// Outras rotas da sua aplicação (AWS S3, DynamoDB, etc.)
+app.use(bodyParser.json());
+app.use(cors()); // Para permitir requisições de diferentes origens
+
+// Exemplo de rota de teste
+app.get('/test', (req, res) => {
+    res.send('Servidor de monitoramento parental está online!');
+});
+
+// Rotas de autenticação (simplificado, implemente a lógica real)
+app.post('/api/register_parent', async (req, res) => {
+    // ... sua lógica de registro de pai
+    res.status(200).send('Registro de pai (placeholder)');
+});
+
+app.post('/api/register_child', async (req, res) => {
+    // ... sua lógica de registro de filho
+    res.status(200).send('Registro de filho (placeholder)');
+});
+
+app.post('/api/login_parent', async (req, res) => {
+    // ... sua lógica de login de pai
+    res.status(200).send('Login de pai (placeholder)');
+});
+
+app.post('/api/login_child', async (req, res) => {
+    // ... sua lógica de login de filho
+    res.status(200).send('Login de filho (placeholder)');
+});
+
+// Rota para obter crianças associadas a um pai (exemplo)
+app.get('/api/parent/:parentId/children', async (req, res) => {
+    const { parentId } = req.params;
+    // Lógica para buscar as crianças no DynamoDB
+    console.log(`[API] Buscando crianças para o pai ${parentId}`);
+    res.json({ children: [{ id: 'child1', name: 'Filho Teste' }] });
+});
+
+// Rota para upload de áudio (se ainda usar S3 para mensagens gravadas)
+const upload = multer({
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+}).single('audio');
+
+app.post('/api/upload_audio', (req, res) => {
+    upload(req, res, async (err) => {
+        if (err instanceof multer.MulterError) {
+            console.error('Multer Error:', err);
+            return res.status(500).json({ success: false, message: `Erro de upload: ${err.message}` });
+        } else if (err) {
+            console.error('Unknown Upload Error:', err);
+            return res.status(500).json({ success: false, message: `Erro desconhecido: ${err.message}` });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'Nenhum arquivo de áudio enviado.' });
+        }
+
+        const { senderId, receiverId, messageType, conversationId } = req.body;
+        if (!senderId || !receiverId || !messageType || !conversationId) {
+            return res.status(400).json({ success: false, message: 'Dados de mensagem incompletos.' });
+        }
+
+        const audioBuffer = req.file.buffer;
+        const audioKey = `audios/${uuidv4()}.mp3`; // Salvar como MP3 (ou o formato real)
+
+        const uploadParams = {
+            Bucket: S3_BUCKET_NAME,
+            Key: audioKey,
+            Body: audioBuffer,
+            ContentType: req.file.mimetype // Usar o mimetype original do arquivo
+        };
+
+        try {
+            const data = await s3.upload(uploadParams).promise();
+            const audioUrl = data.Location;
+
+            const messageId = uuidv4();
+            const timestamp = new Date().toISOString();
+
+            const messageParams = {
+                TableName: DYNAMODB_TABLE_MESSAGES,
+                Item: {
+                    messageId: messageId,
+                    conversationId: conversationId,
+                    senderId: senderId,
+                    receiverId: receiverId,
+                    type: messageType,
+                    content: audioUrl, // URL do áudio no S3
+                    timestamp: timestamp
+                }
+            };
+
+            await docClient.put(messageParams).promise();
+
+            res.json({ success: true, message: 'Áudio enviado com sucesso!', audioUrl: audioUrl, messageId: messageId });
+        } catch (error) {
+            console.error('Erro ao fazer upload para S3 ou salvar no DynamoDB:', error);
+            res.status(500).json({ success: false, message: 'Erro ao processar o upload do áudio.' });
+        }
+    });
+});
+
+
+// Rota para obter conversas (exemplo)
+app.get('/api/conversations/:conversationId/messages', async (req, res) => {
+    const { conversationId } = req.params;
+    // Lógica para buscar mensagens no DynamoDB
+    console.log(`[API] Buscando mensagens para conversa ${conversationId}`);
+    res.json({ messages: [] }); // Retornar mensagens reais
+});
+
+
+// Middleware de erro e 404
 app.use((req, res) => {
     console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`);
     res.status(404).send('Rota não encontrada');
@@ -717,16 +354,14 @@ app.use((err, req, res, next) => {
 });
 
 // --- INICIO ---
-server.listen(PORT || 10000, '0.0.0.0', () => {
-    console.log(`Servidor rodando na porta ${PORT || 10000}`);
+server.listen(PORT, '0.0.0.0', () => { // Usando a variável PORT que pode vir do env
+    console.log(`Servidor rodando na porta ${PORT}`);
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
     console.log(`Bucket S3 configurado via env: ${process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'}`);
     console.log(`AWS Access Key ID configurada via env: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
     console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
     console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
-    console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
-    console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
-    console.log(`Twilio API Key SID configurada via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
-    console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim' : 'Não'}`);
+    console.log(`FFmpeg RTMP Publish URL Base: ${FFMPEG_PUBLISH_RTMP_URL_BASE}`);
+    console.log(`Client HLS Stream HTTP URL Base: ${CLIENT_STREAM_HTTP_URL_BASE}`);
 });
