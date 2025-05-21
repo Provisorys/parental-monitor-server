@@ -286,18 +286,21 @@ app.get('/twilio-token', (req, res) => {
     }
 });
 
+// --- WEBSOCKET SERVER ---
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/audio-stream' });
+
+const parentListeningSockets = new Map(); // Mapa: childId -> WebSocket do pai que está ouvindo
+const activeChildWebSockets = new Map(); // NOVO: Mapa para armazenar as conexões ativas dos filhos
+
 // --- FUNÇÃO AUXILIAR PARA WEBSOCKETS ---
 function findChildWebSocket(childId) {
-    let targetClient = null;
-    // Iterate over all connected WebSocket clients
-    wss.clients.forEach(client => {
-        // Check if the client matches the childId, is not a parent, and is open
-        if (client.clientId === childId && !client.isParent && client.readyState === WebSocket.OPEN) {
-            targetClient = client;
-            return; // Exit the forEach loop once found
-        }
-    });
-    return targetClient;
+    const targetClient = activeChildWebSockets.get(childId); // Tenta buscar diretamente do mapa
+    // Verifica se o cliente existe e se o WebSocket está aberto
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+        return targetClient;
+    }
+    return null;
 }
 
 // --- NOVAS ROTAS PARA LIGAR/DESLIGAR MICROFONE (via HTTP do app pai) ---
@@ -355,11 +358,6 @@ app.post('/stop-microphone', async (req, res) => {
     }
 });
 
-// --- WEBSOCKET SERVER ---
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/audio-stream' });
-
-const parentListeningSockets = new Map(); // Mapa: childId -> WebSocket do pai que está ouvindo
 
 wss.on('connection', ws => {
     console.log('Novo cliente WebSocket conectado');
@@ -376,7 +374,8 @@ wss.on('connection', ws => {
             if (messageString.startsWith('CHILD_ID:')) {
                 ws.clientId = messageString.substring('CHILD_ID:'.length);
                 ws.isParent = false; // Confirma que este é um filho
-                console.log(`Filho conectado com ID: ${ws.clientId}`);
+                activeChildWebSockets.set(ws.clientId, ws); // ADICIONE ESTA LINHA AQUI
+                console.log(`Filho conectado com ID: ${ws.clientId}. Adicionado ao mapa de filhos ativos.`); // MODIFIQUE O LOG PARA CONFIRMAR
                 const parentWs = parentListeningSockets.get(ws.clientId);
                 if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'START_AUDIO' })); // Sinal para o filho começar a transmitir áudio
@@ -470,8 +469,10 @@ wss.on('connection', ws => {
 
     ws.on('close', () => {
         console.log('Cliente WebSocket desconectado');
-        if (ws.clientId) {
+        if (ws.clientId) { // Se for um cliente filho identificado
             console.log(`Filho com ID ${ws.clientId} desconectado.`);
+            activeChildWebSockets.delete(ws.clientId); // ADICIONE ESTA LINHA AQUI
+            console.log(`Filho com ID ${ws.clientId} removido do mapa de filhos ativos.`); // ADICIONE ESTE LOG
             // Remover este filho de quaisquer pais que estivessem ouvindo
             let hadActiveParent = false;
             for (const [childIdInMap, parentWsInMap] of parentListeningSockets.entries()) {
@@ -519,6 +520,10 @@ wss.on('connection', ws => {
 
     ws.on('error', error => {
         console.error('Erro no WebSocket:', error);
+        if (ws.clientId) { // Se for um cliente filho identificado
+            activeChildWebSockets.delete(ws.clientId); // ADICIONE ESTA LINHA AQUI
+            console.log(`Filho com ID ${ws.clientId} removido do mapa de filhos ativos devido a um erro.`); // ADICIONE ESTE LOG
+        }
     });
 });
 
