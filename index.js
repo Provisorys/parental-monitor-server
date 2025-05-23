@@ -43,7 +43,7 @@ app.use(bodyParser.json());
 const upload = multer({ storage: multer.memoryStorage() });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server, path: '/audio-stream' });
 
 // --- Mapas para gerenciar conexões WebSocket ---
 // activeChildWebSockets: { childId: WebSocket }
