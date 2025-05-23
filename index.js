@@ -24,7 +24,7 @@ const s3 = new AWS.S3();
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Usando sua tabela existente
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
 // --- TWILIO CONFIG ---
@@ -38,8 +38,8 @@ const upload = multer();
 
 // --- MIDDLEWARES ---
 app.use(cors());
-app.use(bodyParser.json()); // Para analisar JSON bodies
-app.use(bodyParser.urlencoded({ extended: true })); // Para analisar URL-encoded bodies
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- ROTAS DA API ---
 
@@ -62,14 +62,14 @@ app.post('/notifications', async (req, res) => {
         TableName: DYNAMODB_TABLE_MESSAGES,
         Item: {
             childId: childId,
-            messageId: uuidv4(), // Gera um ID único para a mensagem
+            messageId: uuidv4(),
             message: message,
-            messageType: messageType || 'GENERIC', // Tipo de mensagem padrão
-            timestamp: timestamp || Date.now(), // Usar timestamp fornecido ou o atual
+            messageType: messageType || 'GENERIC',
+            timestamp: timestamp || Date.now(),
             contactOrGroup: contactOrGroup || 'N/A',
             direction: direction || 'N/A',
             phoneNumber: phoneNumber || 'N/A',
-            receivedAt: new Date().toISOString() // Quando o servidor recebeu
+            receivedAt: new Date().toISOString()
         }
     };
 
@@ -86,7 +86,7 @@ app.post('/notifications', async (req, res) => {
 // Rota para obter token Twilio (já existente)
 app.get('/twilio-token', (req, res) => {
     console.log('[TWILIO] Requisição de token Twilio recebida.');
-    const identity = req.query.identity || 'monitor-app-user'; // Identidade do usuário
+    const identity = req.query.identity || 'monitor-app-user';
     const AccessToken = twilio.jwt.AccessToken;
     const VoiceGrant = AccessToken.VoiceGrant;
 
@@ -103,8 +103,8 @@ app.get('/twilio-token', (req, res) => {
     );
 
     const voiceGrant = new VoiceGrant({
-        incomingAllow: true, // Permitir chamadas de entrada
-        outgoingApplicationSid: process.env.TWILIO_APP_SID // SID do seu TwiML App
+        incomingAllow: true,
+        outgoingApplicationSid: process.env.TWILIO_APP_SID
     });
 
     token.addGrant(voiceGrant);
@@ -117,17 +117,9 @@ app.get('/twilio-token', (req, res) => {
 app.post('/start-listening/:childId', async (req, res) => {
     const { childId } = req.params;
     console.log(`[AUDIO_STREAMING] Requisição para iniciar escuta recebida para childId: ${childId}`);
-    // Implementar a lógica para iniciar a escuta do áudio do dispositivo da criança.
-    // Isso pode envolver:
-    // 1. Notificar o dispositivo da criança (via FCM, WebSocket ou outra forma) para iniciar o streaming.
-    // 2. Preparar um endpoint no servidor para receber o fluxo de áudio.
-    // 3. Autenticação/Autorização para garantir que apenas pais autorizados possam iniciar a escuta.
-
-    // Por enquanto, apenas um placeholder:
     try {
-        // Exemplo: Enviar uma notificação para o dispositivo da criança via DynamoDB (ou FCM)
         const params = {
-            TableName: DYNAMODB_TABLE_MESSAGES, // Reutilizando a tabela de mensagens para comandos
+            TableName: DYNAMODB_TABLE_MESSAGES,
             Item: {
                 childId: childId,
                 messageId: uuidv4(),
@@ -150,7 +142,6 @@ app.post('/start-listening/:childId', async (req, res) => {
 app.post('/stop-listening/:childId', async (req, res) => {
     const { childId } = req.params;
     console.log(`[AUDIO_STREAMING] Requisição para parar escuta recebida para childId: ${childId}`);
-    // Implementar a lógica para parar a escuta do áudio.
     try {
         const params = {
             TableName: DYNAMODB_TABLE_MESSAGES,
@@ -173,9 +164,7 @@ app.post('/stop-listening/:childId', async (req, res) => {
 });
 
 
-// ====================================================================
-// NOVA ROTA PARA RECEBER ATUALIZAÇÕES DE LOCALIZAÇÃO (ADICIONADA AQUI)
-// ====================================================================
+// Rota para receber atualizações de localização (já existente)
 app.post('/location-update', async (req, res) => {
     console.log('[LOCATION_UPDATE] Requisição de localização recebida.');
     const { childId, latitude, longitude, timestamp } = req.body;
@@ -186,13 +175,13 @@ app.post('/location-update', async (req, res) => {
     }
 
     const params = {
-        TableName: DYNAMODB_TABLE_LOCATIONS, // Usando a constante para a tabela 'GPSintegracao'
+        TableName: DYNAMODB_TABLE_LOCATIONS,
         Item: {
             childId: childId,
-            timestamp: timestamp, // Unix timestamp em milissegundos
+            timestamp: timestamp,
             latitude: latitude,
             longitude: longitude,
-            recordedAt: new Date(timestamp).toISOString() // Data/hora legível para facilitar a consulta
+            recordedAt: new Date(timestamp).toISOString()
         }
     };
 
@@ -203,6 +192,33 @@ app.post('/location-update', async (req, res) => {
     } catch (error) {
         console.error('[LOCATION_UPDATE_DB_ERROR] Erro ao salvar localização no DynamoDB:', error);
         res.status(500).send('Erro interno do servidor ao salvar localização.');
+    }
+});
+
+// ====================================================================
+// NOVA ROTA PARA SOLICITAR LOCALIZAÇÃO DO APP PAI
+// ====================================================================
+// Mapa para armazenar as conexões WebSocket dos filhos (childId -> WebSocket)
+const connectedChildren = new Map();
+
+app.post('/request-location/:childId', (req, res) => {
+    const { childId } = req.params;
+    console.log(`[REQUEST_LOCATION] Requisição do app pai para obter localização de ${childId}.`);
+
+    const childWs = connectedChildren.get(childId);
+
+    if (childWs && childWs.readyState === WebSocket.OPEN) {
+        // Envia um comando via WebSocket para o dispositivo filho
+        childWs.send(JSON.stringify({
+            command: 'REQUEST_LOCATION',
+            requester: 'PARENT_APP', // Opcional: para o filho saber quem solicitou
+            timestamp: Date.now()
+        }));
+        console.log(`[REQUEST_LOCATION_SENT] Comando de localização enviado via WebSocket para ${childId}.`);
+        res.status(200).send(`Comando de localização enviado para ${childId}.`);
+    } else {
+        console.warn(`[REQUEST_LOCATION_ERROR] Dispositivo filho ${childId} não conectado via WebSocket.`);
+        res.status(404).send('Dispositivo filho não conectado ou offline.');
     }
 });
 
@@ -219,14 +235,14 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     }
 
     const fileExtension = file.originalname.split('.').pop();
-    const fileName = `${childId}/${mediaType}/${messageId}.${fileExtension}`; // Ex: child123/image/abc-123.jpg
+    const fileName = `${childId}/${mediaType}/${messageId}.${fileExtension}`;
 
     const params = {
         Bucket: S3_BUCKET_NAME,
         Key: fileName,
         Body: file.buffer,
         ContentType: file.mimetype,
-        ACL: 'private' // Ajuste conforme sua política de acesso
+        ACL: 'private'
     };
 
     try {
@@ -234,7 +250,6 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         const fileUrl = `https://${S3_BUCKET_NAME}.s3.${AWS.config.region}.amazonaws.com/${fileName}`;
         console.log(`[UPLOAD_SUCCESS] Mídia ${fileName} enviada para S3. URL: ${fileUrl}`);
 
-        // Atualizar a entrada na tabela de mensagens com a URL da mídia
         const updateParams = {
             TableName: DYNAMODB_TABLE_MESSAGES,
             Key: {
@@ -261,7 +276,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
 
 // Manipuladores de erro e rota não encontrada (mantenha-os no final, após todas as rotas)
 app.use((req, res) => {
-    console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`); // Log
+    console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`);
     res.status(404).send('Rota não encontrada');
 });
 
@@ -276,14 +291,38 @@ const wss = new WebSocket.Server({ server });
 
 wss.on('connection', ws => {
     console.log('Cliente WebSocket conectado');
+
+    // Em uma conexão WebSocket, o primeiro pacote do cliente DEVE ser o childId
     ws.on('message', message => {
-        console.log(`Recebido via WebSocket: ${message}`);
-        // Implemente a lógica para lidar com mensagens WebSocket
-        // Por exemplo, encaminhar comandos para dispositivos ou status de volta aos clientes.
+        try {
+            const data = JSON.parse(message);
+            if (data.type === 'REGISTER_CHILD' && data.childId) {
+                // Se a mensagem é um registro de criança
+                connectedChildren.set(data.childId, ws);
+                ws.childId = data.childId; // Armazena o childId na conexão WebSocket
+                console.log(`[WEBSOCKET] ChildId ${data.childId} registrado via WebSocket.`);
+            } else if (data.type === 'LOCATION_ACKNOWLEDGEMENT' && data.childId) {
+                // Mensagem de reconhecimento de localização enviada pelo filho
+                console.log(`[WEBSOCKET] Filho ${data.childId} reconheceu a solicitação de localização.`);
+            } else {
+                console.log(`Recebido via WebSocket (não-registro): ${message}`);
+                // Implemente a lógica para lidar com outras mensagens WebSocket
+            }
+        } catch (e) {
+            console.error('[WEBSOCKET_ERROR] Erro ao analisar mensagem WebSocket ou tipo desconhecido:', e);
+            console.log(`Mensagem RAW: ${message}`);
+        }
     });
+
     ws.on('close', () => {
+        // Remover a conexão do mapa quando o WebSocket é fechado
+        if (ws.childId) {
+            connectedChildren.delete(ws.childId);
+            console.log(`[WEBSOCKET] ChildId ${ws.childId} desconectado.`);
+        }
         console.log('Cliente WebSocket desconectado');
     });
+
     ws.on('error', error => {
         console.error('Erro no WebSocket:', error);
     });
@@ -298,5 +337,5 @@ server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
-    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`); // Adicionado para confirmação
+    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`);
 });
