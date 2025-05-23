@@ -5,7 +5,7 @@ const cors = require('cors');
 const AWS = require('aws-sdk');
 const twilio = require('twilio');
 const http = require('http');
-const WebSocket = require('ws'); // Já importado
+const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const { spawn } = require('child_process');
 
@@ -44,29 +44,25 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 // --- Mapas para gerenciar conexões WebSocket ---
-const childSockets = new Map(); // childId -> WebSocket
-const parentListeners = new Map(); // childId -> Set<WebSocket> (Set para múltiplos pais ouvindo o mesmo filho)
+const childSockets = new Map();
+const parentListeners = new Map();
 
 // --- Funções HTTP para sinalização e outras funcionalidades ---
 app.post('/start-listening/:childId', (req, res) => {
     const { childId } = req.params;
     console.log(`[HTTP] Solicitação para iniciar escuta para childId: ${childId}`);
-    // Adicione aqui qualquer lógica de notificação ou inicialização adicional, se necessário
     res.status(200).send('Listening initiated');
 });
 
 app.post('/stop-listening/:childId', (req, res) => {
     const { childId } = req.params;
     console.log(`[HTTP] Solicitação para parar escuta para childId: ${childId}`);
-    // Adicione aqui qualquer lógica para parar o monitoramento/streaming, se necessário
     res.status(200).send('Listening stopped');
 });
 
 // --- NOVA ROTA DE NOTIFICAÇÕES (PARA TESTES) ---
 app.post('/notifications', (req, res) => {
     console.log('[HTTP] Requisição POST recebida na rota /notifications');
-    // Você pode adicionar uma lógica de processamento de notificação aqui se precisar
-    // Por enquanto, apenas responde com sucesso para evitar o erro "Rota não encontrada"
     res.status(200).send('Notificação recebida com sucesso.');
 });
 
@@ -89,7 +85,7 @@ app.get('/twilio-token', (req, res) => {
     const voiceGrant = new VoiceGrant({
         incomingAllow: true,
         outgoingApplicationSid: process.env.TWILIO_APP_SID,
-    );
+    }); // CORREÇÃO: Faltava a chave de fechamento '}' aqui.
 
     accessToken.addGrant(voiceGrant);
     res.json({ token: accessToken.toJwt() });
@@ -139,7 +135,7 @@ app.get('/conversations/:childId', async (req, res) => {
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
             KeyConditionExpression: 'childId = :cid',
             ExpressionAttributeValues: { ':cid': childId },
-            ScanIndexForward: false // Mais recentes primeiro
+            ScanIndexForward: false
         }).promise();
         res.json(result.Items);
     } catch (error) {
@@ -153,10 +149,10 @@ app.get('/conversations/:conversationId/messages', async (req, res) => {
     try {
         const result = await docClient.query({
             TableName: DYNAMODB_TABLE_MESSAGES,
-            IndexName: 'conversationId-index', // Certifique-se de que este índice existe
+            IndexName: 'conversationId-index',
             KeyConditionExpression: 'conversationId = :cid',
             ExpressionAttributeValues: { ':cid': conversationId },
-            ScanIndexForward: true // Mensagens em ordem cronológica
+            ScanIndexForward: true
         }).promise();
         res.json(result.Items);
     } catch (error) {
@@ -166,25 +162,24 @@ app.get('/conversations/:conversationId/messages', async (req, res) => {
 });
 
 // --- FUNÇÃO PARA GERAR O CABEÇALHO WAV ---
-// Parâmetros de áudio do App Filho: 16kHz, Mono, 16-bit PCM
 function createWavHeader(dataSize) {
     const sampleRate = 16000;
     const numChannels = 1;
     const bitsPerSample = 16;
-    const byteRate = sampleRate * numChannels * bitsPerSample / 8; // Bytes por segundo
-    const blockAlign = numChannels * bitsPerSample / 8; // Bytes por amostra para todos os canais
+    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const blockAlign = numChannels * bitsPerSample / 8;
 
-    const header = Buffer.alloc(44); // Tamanho padrão do cabeçalho WAV
+    const header = Buffer.alloc(44);
 
     // RIFF Chunk
     header.write('RIFF', 0);
-    header.writeUInt32LE(36 + dataSize, 4); // ChunkSize (36 bytes para o resto do cabeçalho + tamanho dos dados)
+    header.writeUInt32LE(36 + dataSize, 4);
     header.write('WAVE', 8);
 
     // fmt Subchunk
     header.write('fmt ', 12);
-    header.writeUInt32LE(16, 16);  // Subchunk1Size (16 para PCM)
-    header.writeUInt16LE(1, 20);   // AudioFormat (1 para PCM)
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20);
     header.writeUInt16LE(numChannels, 22);
     header.writeUInt32LE(sampleRate, 24);
     header.writeUInt32LE(byteRate, 28);
@@ -193,7 +188,7 @@ function createWavHeader(dataSize) {
 
     // data Subchunk
     header.write('data', 36);
-    header.writeUInt32LE(dataSize, 40); // Subchunk2Size (tamanho dos dados de áudio)
+    header.writeUInt32LE(dataSize, 40);
 
     return header;
 }
@@ -203,18 +198,15 @@ wss.on('connection', ws => {
     console.log('[WS] Novo cliente conectado.');
 
     ws.on('message', message => {
-        // Tenta parsear como JSON primeiro para comandos de sinalização
         try {
             const parsedMessage = JSON.parse(message);
 
             if (parsedMessage.childId) {
-                // É o App Filho se registrando
                 ws.isChild = true;
                 ws.childId = parsedMessage.childId;
                 childSockets.set(ws.childId, ws);
                 console.log(`[WS] App Filho '${ws.childId}' conectado.`);
             } else if (parsedMessage.type === 'LISTEN_TO_CHILD' && parsedMessage.childId) {
-                // É o App Pai solicitando escuta
                 ws.isParent = true;
                 ws.listeningChildId = parsedMessage.childId;
                 if (!parentListeners.has(ws.listeningChildId)) {
@@ -226,28 +218,18 @@ wss.on('connection', ws => {
                 console.warn(`[WS] Mensagem JSON desconhecida de cliente:`, parsedMessage);
             }
         } catch (e) {
-            // Se não for JSON, assumimos que são dados de áudio binários do App Filho
-            // O 'message' aqui é um Buffer (dados binários)
             if (ws.isChild && ws.childId && parentListeners.has(ws.childId)) {
-                // console.log(`[WS] Recebendo dados de áudio de '${ws.childId}' (tamanho: ${message.length} bytes).`); // Removido para reduzir logs de spam
-
                 const listeners = parentListeners.get(ws.childId);
                 listeners.forEach(listenerWs => {
                     if (listenerWs.readyState === WebSocket.OPEN) {
-                        // 1. Gera o cabeçalho WAV para este CHUNK de áudio
-                        const wavHeader = createWavHeader(message.length); // message.length é o tamanho dos dados brutos de áudio
-                        // 2. Combina o cabeçalho com os dados brutos de áudio
+                        const wavHeader = createWavHeader(message.length);
                         const wavChunkBinary = Buffer.concat([wavHeader, message]);
-                        // 3. Codifica o chunk WAV BINÁRIO para Base64 (para ser enviado como string para o Kodular)
                         const wavChunkBase64 = wavChunkBinary.toString('base64');
-                        // 4. Envia a string Base64 para o App Pai
                         listenerWs.send(wavChunkBase64);
-                        // console.log(`[WS] Retransmitido chunk de áudio (Base64, ${wavChunkBase64.length} chars) para pai escutando ${ws.childId}.`); // Removido para reduzir logs de spam
                     }
                 });
             } else {
-                // Mensagens de clientes não identificados ou não crianças
-                // console.log('[WS] Mensagem de texto ou binária não tratada:', message.toString().substring(0, 50) + '...'); // Removido para reduzir logs de spam
+                // console.log('[WS] Mensagem de texto ou binária não tratada:', message.toString().substring(0, 50) + '...');
             }
         }
     });
