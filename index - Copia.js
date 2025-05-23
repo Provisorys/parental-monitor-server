@@ -24,7 +24,6 @@ const s3 = new AWS.S3();
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Usando sua tabela existente
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
 // --- TWILIO CONFIG ---
@@ -59,7 +58,7 @@ app.post('/notifications', async (req, res) => {
     const messageTypeString = messageType || 'TEXT_MESSAGE';
 
     if (!childId || !message) {
-        console.warn('[NOTIFICATIONS] Erro: childId ou message faltando.');
+        console.warn('[NOTIFICATIONS] Erro: childId ou message faltando.'); // Log
         return res.status(400).json({ message: 'childId e message são obrigatórios' });
     }
 
@@ -110,7 +109,7 @@ app.post('/notifications', async (req, res) => {
 
         res.status(200).json({ message: 'Notificação recebida e salva com sucesso' });
     } catch (error) {
-        console.error('[NOTIFICATIONS] Erro ao processar notificação:', error);
+        console.error('[NOTIFICATIONS] Erro ao processar notificação:', error); // Log
         res.status(500).json({ message: 'Erro interno', error: error.message });
     }
 });
@@ -121,11 +120,11 @@ app.post('/media', upload.single('file'), async (req, res) => {
     const timestampValue = timestamp || Date.now();
 
     if (!file) {
-        console.warn('[MEDIA] Erro: Arquivo é obrigatório.');
+        console.warn('[MEDIA] Erro: Arquivo é obrigatório.'); // Log
         return res.status(400).json({ message: 'Arquivo é obrigatório' });
     }
     if (!direction || !['sent', 'received'].includes(direction)) {
-        console.warn('[MEDIA] Erro: direction deve ser "sent" ou "received".');
+        console.warn('[MEDIA] Erro: direction deve ser "sent" ou "received".'); // Log
         return res.status(400).json({ message: 'direction deve ser "sent" ou "received"' });
     }
 
@@ -142,7 +141,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
             Body: file.buffer,
             ContentType: file.mimetype
         }).promise();
-        console.log(`[MEDIA] Arquivo ${s3Key} enviado com sucesso para S3.`);
+        console.log(`[MEDIA] Arquivo ${s3Key} enviado com sucesso para S3.`); // Log
 
         const messageItem = {
             id: mediaId,
@@ -160,7 +159,7 @@ app.post('/media', upload.single('file'), async (req, res) => {
             TableName: DYNAMODB_TABLE_MESSAGES,
             Item: messageItem
         }).promise();
-        console.log('[MEDIA] Entrada de mídia salva com sucesso no DynamoDB.');
+        console.log('[MEDIA] Entrada de mídia salva com sucesso no DynamoDB.'); // Log
 
         await docClient.update({
             TableName: DYNAMODB_TABLE_CONVERSATIONS,
@@ -182,87 +181,20 @@ app.post('/media', upload.single('file'), async (req, res) => {
                 ':direction': direction
             }
         }).promise();
-        console.log('[MEDIA] Conversa atualizada com sucesso no DynamoDB para mídia.');
+        console.log('[MEDIA] Conversa atualizada com sucesso no DynamoDB para mídia.'); // Log
 
         res.status(200).json({ message: 'Mídia recebida com sucesso', s3Url: messageItem.s3Url });
 
     } catch (error) {
-        console.error('[MEDIA] Erro ao processar mídia:', error);
+        console.error('[MEDIA] Erro ao processar mídia:', error); // Log
         res.status(500).json({ message: 'Erro ao processar mídia', error: error.message });
     }
 });
 
-// --- NOVA ROTA PARA ENVIAR LOCALIZAÇÃO (APP FILHO -> SERVIDOR -> DYNAMODB) ---
-app.post('/location-update', async (req, res) => {
-    const { childId, latitude, longitude, timestamp } = req.body;
-    const timestampValue = timestamp || Date.now();
-
-    if (!childId || latitude === undefined || longitude === undefined) {
-        console.warn('[LOCATION] Erro: childId, latitude ou longitude faltando.');
-        return res.status(400).json({ message: 'childId, latitude e longitude são obrigatórios' });
-    }
-
-    const locationItem = {
-        childId,
-        timestamp: timestampValue,
-        latitude: parseFloat(latitude), // Garantir que são números
-        longitude: parseFloat(longitude) // Garantir que são números
-    };
-
-    try {
-        await docClient.put({
-            TableName: DYNAMODB_TABLE_LOCATIONS, // Usando a sua tabela GPSintegracao
-            Item: locationItem
-        }).promise();
-        console.log(`[LOCATION] Localização salva com sucesso no DynamoDB para ${childId}: Latitude ${latitude}, Longitude ${longitude}.`);
-        res.status(200).json({ message: 'Localização recebida e salva com sucesso' });
-    } catch (error) {
-        console.error('[LOCATION] Erro ao processar atualização de localização:', error);
-        res.status(500).json({ message: 'Erro interno ao salvar localização', error: error.message });
-    }
-});
-
-// --- NOVA ROTA PARA OBTER A ÚLTIMA LOCALIZAÇÃO (APP PAI <- SERVIDOR <- DYNAMODB) ---
-app.get('/get-last-location/:childId', async (req, res) => {
-    const { childId } = req.params;
-
-    if (!childId) {
-        console.warn('[LOCATION_GET] Erro: childId é obrigatório na requisição de localização.');
-        return res.status(400).json({ message: 'childId é obrigatório' });
-    }
-
-    try {
-        console.log(`[LOCATION_GET] Buscando última localização para childId: ${childId} na tabela ${DYNAMODB_TABLE_LOCATIONS}`);
-        const data = await docClient.query({
-            TableName: DYNAMODB_TABLE_LOCATIONS,
-            KeyConditionExpression: 'childId = :cid',
-            ExpressionAttributeValues: {
-                ':cid': childId
-            },
-            Limit: 1, // Queremos apenas a última
-            ScanIndexForward: false // Ordena do mais recente para o mais antigo (do timestamp)
-        }).promise();
-
-        if (data.Items && data.Items.length > 0) {
-            const lastLocation = data.Items[0];
-            console.log(`[LOCATION_GET] Última localização encontrada para ${childId}: Latitude ${lastLocation.latitude}, Longitude ${lastLocation.longitude}`);
-            res.status(200).json(lastLocation);
-        } else {
-            console.log(`[LOCATION_GET] Nenhuma localização encontrada para ${childId}.`);
-            res.status(404).json({ message: 'Nenhuma localização encontrada para este childId.' });
-        }
-
-    } catch (error) {
-        console.error('[LOCATION_GET] Erro ao buscar última localização:', error);
-        res.status(500).json({ message: 'Erro ao buscar localização', error: error.message });
-    }
-});
-
-
 app.get('/get-conversations/:childId', async (req, res) => {
     const { childId } = req.params;
     if (!childId) {
-        console.warn('[CONVERSATIONS] Erro: childId é obrigatório na requisição de conversas.');
+        console.warn('[CONVERSATIONS] Erro: childId é obrigatório na requisição de conversas.'); // Log
         return res.status(400).json({ message: 'childId é obrigatório' });
     }
 
@@ -343,7 +275,7 @@ app.get('/twilio-token', (req, res) => {
     const { identity } = req.query;
 
     if (!identity) {
-        console.warn('[TWILIO] Erro: A identidade (identity) é obrigatória para o token Twilio.');
+        console.warn('[TWILIO] Erro: A identidade (identity) é obrigatória para o token Twilio.'); // Log
         return res.status(400).send('A identidade (identity) é obrigatória.');
     }
 
@@ -377,12 +309,12 @@ const activeChildWebSockets = new Map(); // Mapa: childId -> WebSocket do filho 
 // --- FUNÇÃO AUXILIAR PARA WEBSOCKETS ---
 function findChildWebSocket(childId) {
     const targetClient = activeChildWebSockets.get(childId);
-    console.log(`[WS_FIND] Buscando WebSocket para childId: ${childId}. Estado atual do mapa activeChildWebSockets: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
+    console.log(`[WS_FIND] Buscando WebSocket para childId: ${childId}. Estado atual do mapa activeChildWebSockets: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`); // Log de debug
     if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-        console.log(`[WS_FIND] WebSocket ENCONTRADO e ABERTO para childId: ${childId}`);
+        console.log(`[WS_FIND] WebSocket ENCONTRADO e ABERTO para childId: ${childId}`); // Log de debug
         return targetClient;
     }
-    console.log(`[WS_FIND] WebSocket NÃO ENCONTRADO ou FECHADO para childId: ${childId}. readyState: ${targetClient ? targetClient.readyState : 'N/A'}`);
+    console.log(`[WS_FIND] WebSocket NÃO ENCONTRADO ou FECHADO para childId: ${childId}. readyState: ${targetClient ? targetClient.readyState : 'N/A'}`); // Log de debug
     return null;
 }
 
@@ -397,7 +329,7 @@ app.post('/start-microphone', async (req, res) => {
 
     console.log(`[HTTP_CMD] Recebida requisição POST /start-microphone para o filho: ${childId}`);
 
-    const childWs = findChildWebSocket(childId);
+    const childWs = findChildWebSocket(childId); // Esta função já tem logs de debug
 
     if (childWs) {
         try {
@@ -425,7 +357,7 @@ app.post('/stop-microphone', async (req, res) => {
 
     console.log(`[HTTP_CMD] Recebida requisição POST /stop-microphone para o filho: ${childId}`);
 
-    const childWs = findChildWebSocket(childId);
+    const childWs = findChildWebSocket(childId); // Esta função já tem logs de debug
 
     if (childWs) {
         try {
@@ -446,7 +378,7 @@ app.post('/stop-microphone', async (req, res) => {
 
 wss.on('connection', ws => {
     ws.id = uuidv4();
-    console.log(`[WS_CONNECT] Novo cliente WebSocket conectado. ID da conexão: ${ws.id}. Total de conexões ativas: ${wss.clients.size}`);
+    console.log(`[WS_CONNECT] Novo cliente WebSocket conectado. ID da conexão: ${ws.id}. Total de conexões ativas: ${wss.clients.size}`); // Log
 
     ws.isParent = false;
     ws.clientId = null;
@@ -455,8 +387,9 @@ wss.on('connection', ws => {
     ws.on('message', message => {
         const messageOrigin = ws.clientId ? `Filho ${ws.clientId} (Conexão ${ws.id})` : (ws.parentId ? `Pai ${ws.parentId} (Conexão ${ws.id})` : `Conexão ${ws.id}`);
 
-        let processedAsText = false;
+        let processedAsText = false; // Flag para controlar se a mensagem foi processada como texto
 
+        // Tenta processar como string primeiro
         if (typeof message === 'string') {
             const messageString = message.toString();
             const displayMessage = messageString.length > 100 ? messageString.substring(0, 100) + '...' : messageString;
@@ -543,6 +476,7 @@ wss.on('connection', ws => {
             }
         }
 
+        // Se não foi processada como string, tente decodificar como UTF-8 se for binário
         if (!processedAsText && (message instanceof Buffer || message instanceof ArrayBuffer)) {
             try {
                 const decodedMessage = message.toString('utf8');
@@ -563,10 +497,13 @@ wss.on('connection', ws => {
                         console.log(`[WS_MSG] [Conexão ${ws.id}] Filho ${ws.clientId} conectado (via binário decodificado), mas nenhum pai está ouvindo ativamente neste momento.`);
                     }
                 } else if (ws.clientId && !ws.isParent) {
+                    // Se já tiver um clientId e não for um pai, assume que é áudio
                     const parentWs = parentListeningSockets.get(ws.clientId);
                     if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                        parentWs.send(message);
+                        parentWs.send(message); // Retransmite o Buffer original
+                        // console.log(`[WS_MSG] [${messageOrigin}] Bytes de áudio retransmitidos para o pai de ${ws.clientId}: ${message.length} bytes.`);
                     } else {
+                        // console.log(`[WS_MSG] [${messageOrigin}] Pai não está ouvindo o filho ${ws.clientId}, descartando ${message.length} bytes de áudio.`);
                     }
                 } else {
                     console.warn(`[WS_MSG] [${messageOrigin}] Mensagem binária recebida que não é CHILD_ID e não é esperada para áudio neste contexto. Tamanho: ${message.length} bytes.`);
@@ -575,19 +512,19 @@ wss.on('connection', ws => {
                 console.error(`${messageOrigin} Erro ao decodificar mensagem binária como UTF-8: ${e.message}`, e);
                 console.warn(`${messageOrigin} Mensagem binária recebida inesperada (não pôde ser decodificada como UTF-8): ${message.length} bytes.`);
             }
-        } else if (!processedAsText) {
+        } else if (!processedAsText) { // Se não foi string e não foi Buffer/ArrayBuffer
             console.warn(`[WS_MSG] [${messageOrigin}] Mensagem recebida não é string nem binária esperada. Tipo: ${typeof message}, Tamanho: ${message ? message.length : 'N/A'}`);
         }
     });
 
     ws.on('close', (code, reason) => {
         const messageOrigin = ws.clientId ? `Filho ${ws.clientId} (Conexão ${ws.id})` : (ws.parentId ? `Pai ${ws.parentId} (Conexão ${ws.id})` : `Conexão ${ws.id}`);
-        console.log(`[WS_CLOSE] [${messageOrigin}] Cliente WebSocket desconectado. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}. Total de conexões ativas: ${wss.clients.size - 1}`);
+        console.log(`[WS_CLOSE] [${messageOrigin}] Cliente WebSocket desconectado. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}. Total de conexões ativas: ${wss.clients.size - 1}`); // Log
 
         if (ws.clientId) {
             console.log(`[WS_CLOSE] [${messageOrigin}] Tentando remover Filho com ID ${ws.clientId} do mapa activeChildWebSockets.`);
             activeChildWebSockets.delete(ws.clientId);
-            console.log(`[WS_CLOSE] [${messageOrigin}] Filho com ID ${ws.clientId} removido. Mapa activeChildWebSockets após remoção: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
+            console.log(`[WS_CLOSE] [${messageOrigin}] Filho com ID ${ws.clientId} removido. Mapa activeChildWebSockets após remoção: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`); // Log crucial
 
             let hadActiveParent = false;
             for (const [childIdInMap, parentWsInMap] of parentListeningSockets.entries()) {
@@ -636,7 +573,7 @@ wss.on('connection', ws => {
         if (ws.clientId) {
             console.log(`[WS_ERROR] [${messageOrigin}] Tentando remover Filho com ID ${ws.clientId} do mapa activeChildWebSockets devido a um erro.`);
             activeChildWebSockets.delete(ws.clientId);
-            console.log(`[WS_ERROR] [${messageOrigin}] Filho com ID ${ws.clientId} removido. Mapa activeChildWebSockets após remoção: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
+            console.log(`[WS_ERROR] [${messageOrigin}] Filho com ID ${ws.clientId} removido. Mapa activeChildWebSockets após remoção: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`); // Log crucial
         }
         if (ws.isParent && ws.parentId) {
            for (const [childIdBeingListened, parentWsListening] of parentListeningSockets.entries()) {
@@ -666,7 +603,7 @@ wss.on('connection', ws => {
 
 // --- ERROS ---
 app.use((req, res) => {
-    console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`);
+    console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`); // Log
     res.status(404).send('Rota não encontrada');
 });
 app.use((err, req, res, next) => {
@@ -684,7 +621,6 @@ server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
-    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`); // Nova constante
     console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key SID configurada via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim' : 'Não'}`);
