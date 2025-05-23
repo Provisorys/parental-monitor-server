@@ -52,7 +52,7 @@ const wss = new WebSocket.Server({ server });
 const activeChildWebSockets = new Map();
 // parentListeningSockets: { childId: WebSocket (do pai que está ouvindo) }
 const parentListeningSockets = new Map();
-// parentControlSockets: { parentId: WebSocket } - Para comandos gerais do pai (não streaming)
+// parentControlSockets: { parentId: WebSocket } - Para comandos gerais do pai (não streaming), ou notificações
 const parentControlSockets = new Map();
 
 
@@ -136,7 +136,7 @@ wss.on('connection', ws => {
                         const childStatus = activeChildWebSockets.has(childId) && findChildWebSocket(childId) !== null ? "online" : "offline";
                         ws.send(JSON.stringify({ type: "CHILD_STATUS", childId: childId, status: childStatus }));
                         console.log(`[WS_CMD] Status do filho ${childId} (${childStatus}) enviado para o pai ${ws.parentId}.`);
-                    } else if (parsedMessage.type === "LIST_CHILDREN") {
+                    } else if (parsedMessage.type === "LIST_CHILDREN") { // Embora GET /get-child-ids seja usado, essa rota pode ser um fallback via WS
                         const childrenIds = Array.from(activeChildWebSockets.keys());
                         ws.send(JSON.stringify({ type: "CHILDREN_LIST", children: childrenIds }));
                         console.log(`[WS_CMD] Lista de filhos (${childrenIds.length}) enviada para o pai ${ws.parentId}.`);
@@ -153,7 +153,7 @@ wss.on('connection', ws => {
                 ws.send(JSON.stringify({ type: 'ERROR', message: 'Mensagem de texto desconhecida.' }));
             }
         }
-        // MODIFICAÇÃO CHAVE AQUI: Trata mensagens binárias
+        // MODIFICAÇÃO CHAVE AQUI: Trata mensagens binárias (para acomodar Kodular)
         else if (message instanceof Buffer || message instanceof ArrayBuffer) {
             const bufferMessage = Buffer.from(message);
             const messageLength = bufferMessage.length;
@@ -163,9 +163,10 @@ wss.on('connection', ws => {
                 // Isso cobre o cenário do Kodular enviando strings como binário
                 const potentialCommand = bufferMessage.toString('utf8');
                 const displayPotentialCommand = potentialCommand.length > 100 ? potentialCommand.substring(0, 100) + '...' : potentialCommand;
-                console.log(`[WS_MSG] [${messageOrigin}] Mensagem binária recebida. Tamanho: ${messageLength} bytes. Tentando decodificar como UTF-8: "${displayPotentialCommand}"`);
-
+                
+                // Se a mensagem binária for um comando reconhecido, processa-a
                 if (potentialCommand.startsWith('LISTEN_TO_CHILD:')) { // <--- AGORA TRATADO AQUI
+                    console.log(`[WS_MSG] [${messageOrigin}] Mensagem binária (decodificada) recebida: "${displayPotentialCommand}"`);
                     if (ws.isParent) {
                         const targetChildId = potentialCommand.substring('LISTEN_TO_CHILD:'.length);
                         parentListeningSockets.set(targetChildId, ws); // Associa o pai ao filho que ele quer ouvir
@@ -186,6 +187,7 @@ wss.on('connection', ws => {
                         console.warn(`[WS_MSG] [Conexão ${ws.id}] Tentativa de comando LISTEN_TO_CHILD de um cliente não-pai. Mensagem: ${potentialCommand}`);
                     }
                 } else if (potentialCommand.startsWith('STOP_LISTENING_TO_CHILD:')) { // <--- AGORA TRATADO AQUI
+                    console.log(`[WS_MSG] [${messageOrigin}] Mensagem binária (decodificada) recebida: "${displayPotentialCommand}"`);
                     if (ws.isParent) {
                         const targetChildId = potentialCommand.substring('STOP_LISTENING_TO_CHILD:'.length);
                         if (parentListeningSockets.has(targetChildId) && parentListeningSockets.get(targetChildId) === ws) {
@@ -324,7 +326,7 @@ app.post('/stop-microphone', async (req, res) => {
     res.status(200).send(`Comando STOP_AUDIO_STREAMING enviado para ${childId}.`);
 });
 
-// NOVO: Rota para obter os IDs dos filhos
+// Rota para obter os IDs dos filhos - Restaurada e Aprimorada
 app.get('/get-child-ids', async (req, res) => {
     console.log(`[HTTP_REQUEST] Requisição recebida: GET /get-child-ids`);
     try {
@@ -332,16 +334,18 @@ app.get('/get-child-ids', async (req, res) => {
             TableName: DYNAMODB_TABLE_CHILDREN
         };
         const data = await docClient.scan(params).promise();
-        const childIds = data.Items.map(item => item.childId);
+        const childIdsFromDB = data.Items.map(item => item.childId);
 
-        // Adiciona filhos conectados via WebSocket que podem não estar no DynamoDB ainda
+        // Adiciona IDs de filhos atualmente conectados via WebSocket
         const connectedChildIds = Array.from(activeChildWebSockets.keys());
-        const combinedChildIds = Array.from(new Set([...childIds, ...connectedChildIds])); // Remove duplicatas
+        
+        // Combina e remove duplicatas para uma lista única
+        const combinedChildIds = Array.from(new Set([...childIdsFromDB, ...connectedChildIds]));
 
         console.log(`[HTTP_RESPONSE] Enviando ${combinedChildIds.length} IDs de filhos.`);
         res.status(200).json({ childIds: combinedChildIds });
     } catch (error) {
-        console.error('[HTTP_ERROR] Erro ao obter child IDs do DynamoDB:', error);
+        console.error('[HTTP_ERROR] Erro ao obter child IDs:', error);
         res.status(500).send('Erro ao obter child IDs.');
     }
 });
@@ -398,7 +402,6 @@ app.post('/messages', upload.single('media'), async (req, res) => {
         console.log('[DYNAMODB] Mensagem salva com sucesso no DynamoDB.');
 
         // Notificar pai via WebSocket se estiver conectado e ouvindo (para notificações gerais)
-        // Isso assume que o pai tem uma conexão 'parentControlSockets' para receber notificações
         const parentWsList = Array.from(parentControlSockets.values());
         parentWsList.forEach(parentWs => {
             if (parentWs.readyState === WebSocket.OPEN) {
