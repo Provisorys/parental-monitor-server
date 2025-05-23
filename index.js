@@ -60,10 +60,30 @@ app.post('/stop-listening/:childId', (req, res) => {
     res.status(200).send('Listening stopped');
 });
 
-// --- NOVA ROTA DE NOTIFICAÇÕES (PARA TESTES) ---
 app.post('/notifications', (req, res) => {
     console.log('[HTTP] Requisição POST recebida na rota /notifications');
     res.status(200).send('Notificação recebida com sucesso.');
+});
+
+// --- NOVA ROTA PARA OBTER CHILD IDs ---
+app.get('/get-child-ids', async (req, res) => {
+    console.log('[HTTP] Requisição GET recebida na rota /get-child-ids');
+    try {
+        // Assume que a tabela Children tem um campo 'childId' que é a chave primária
+        // ou que podemos fazer um Scan para obter todos os itens e extrair os IDs.
+        // Se a tabela Children crescer muito, considere otimizar esta consulta.
+        const params = {
+            TableName: DYNAMODB_TABLE_CHILDREN,
+            ProjectionExpression: "childId" // Retorna apenas o atributo childId
+        };
+        const result = await docClient.scan(params).promise();
+        const childIds = result.Items.map(item => item.childId);
+        console.log(`[HTTP] Child IDs encontrados: ${childIds.join(', ')}`);
+        res.json({ childIds: childIds });
+    } catch (error) {
+        console.error('[HTTP_ERROR] Erro ao buscar child IDs do DynamoDB:', error);
+        res.status(500).send('Erro ao buscar child IDs.');
+    }
 });
 
 // --- Rota para obter token Twilio (se ainda for usada) ---
@@ -85,7 +105,7 @@ app.get('/twilio-token', (req, res) => {
     const voiceGrant = new VoiceGrant({
         incomingAllow: true,
         outgoingApplicationSid: process.env.TWILIO_APP_SID,
-    }); // CORREÇÃO: Faltava a chave de fechamento '}' aqui.
+    });
 
     accessToken.addGrant(voiceGrant);
     res.json({ token: accessToken.toJwt() });
