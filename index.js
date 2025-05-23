@@ -328,21 +328,23 @@ app.get('/get-child-ids', async (req, res) => {
     console.log(`[HTTP_REQUEST] Requisição recebida: GET /get-child-ids`);
     try {
         const params = {
-            TableName: DYNAMODB_TABLE_CONVERSATIONS // MANTIDO: Escaneando 'Conversations' como solicitado
+            TableName: DYNAMODB_TABLE_CONVERSATIONS 
         };
         console.log(`[CHILD_IDS] Tentando escanear child IDs na tabela ${DYNAMODB_TABLE_CONVERSATIONS} do DynamoDB.`);
         const data = await docClient.scan(params).promise();
         
-        // Pega os childIds únicos da coluna 'childId' da tabela Conversations
         const childIdsFromDB = Array.from(new Set(data.Items.map(item => item.childId)));
 
-        // Adiciona IDs de filhos atualmente conectados via WebSocket (se houver)
         const connectedChildIds = Array.from(activeChildWebSockets.keys());
         
-        // Combina e remove duplicatas para uma lista única final
         const combinedChildIds = Array.from(new Set([...childIdsFromDB, ...connectedChildIds]));
 
-        console.log(`[CHILD_IDS] childIDs encontrados (GET /get-child-ids): ${JSON.stringify(combinedChildIds)}`);
+        // === AJUSTE DE LOG PARA CLAREZA, NÃO MUDA A RESPOSTA JSON ===
+        console.log(`[CHILD_IDS] childIDs encontrados (GET /get-child-ids): [`);
+        combinedChildIds.forEach(id => console.log(`  '${id}',`));
+        console.log(`]`);
+        // ==========================================================
+
         res.status(200).json({ childIds: combinedChildIds });
     } catch (error) {
         console.error('[HTTP_ERROR] Erro ao obter child IDs:', error);
@@ -369,7 +371,7 @@ app.post('/messages', upload.single('media'), async (req, res) => {
             Key: `media/${childId}/${uniqueFileName}`,
             Body: mediaFile.buffer,
             ContentType: mediaFile.mimetype,
-            ACL: 'public-read' // Ou outra política de acesso que você preferir
+            ACL: 'public-read' 
         };
 
         try {
@@ -390,7 +392,7 @@ app.post('/messages', upload.single('media'), async (req, res) => {
             type,
             sender,
             content,
-            timestamp: new Date(timestamp).toISOString(), // Garante formato ISO
+            timestamp: new Date(timestamp).toISOString(), 
             contactOrGroup,
             mediaUrl,
             createdAt: new Date().toISOString()
@@ -401,12 +403,11 @@ app.post('/messages', upload.single('media'), async (req, res) => {
         await docClient.put(params).promise();
         console.log('[DYNAMODB] Mensagem salva com sucesso no DynamoDB.');
 
-        // Notificar pai via WebSocket se estiver conectado e ouvindo (para notificações gerais)
         const parentWsList = Array.from(parentControlSockets.values());
         parentWsList.forEach(parentWs => {
             if (parentWs.readyState === WebSocket.OPEN) {
                 parentWs.send(JSON.stringify({
-                    type: 'NEW_MESSAGE_NOTIFICATION', // Tipo de notificação para o pai
+                    type: 'NEW_MESSAGE_NOTIFICATION', 
                     data: {
                         childId, type, sender, content, timestamp, contactOrGroup, mediaUrl
                     }
@@ -432,7 +433,6 @@ app.post('/notifications', async (req, res) => {
         return res.status(400).send('Dados da notificação incompletos.');
     }
 
-    // Usar 'childId' e 'contactOrGroup' como chaves compostas para a tabela Conversations
     const params = {
         TableName: DYNAMODB_TABLE_CONVERSATIONS, 
         Key: {
