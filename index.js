@@ -43,7 +43,10 @@ app.use(bodyParser.json());
 const upload = multer({ storage: multer.memoryStorage() });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/audio-stream' });
+
+// **** CORREÇÃO AQUI: Especificar o caminho do WebSocket Server ****
+const wss = new WebSocket.Server({ server, path: '/audio-stream' }); 
+// ******************************************************************
 
 // --- Mapas para gerenciar conexões WebSocket ---
 // activeChildWebSockets: { childId: WebSocket }
@@ -92,6 +95,13 @@ app.post('/start-microphone', (req, res) => {
         res.status(200).send(`Comando de iniciar microfone enviado para ${childId}.`);
     } else {
         console.error(`[HTTP_CMD] ERRO: Nenhuma conexão WebSocket ativa encontrada para o filho: ${childId}. O comando START_AUDIO NÃO PODE ser enviado.`);
+        // Mais detalhes para depuração:
+        console.log(`[WS_FIND] Buscando WebSocket para childId: ${childId}. Estado atual do mapa activeChildWebSockets: [${Array.from(activeChildWebSockets.keys()).join(', ')}]`);
+        if (!childWs) {
+            console.log(`[WS_FIND] WebSocket NÃO ENCONTRADO para childId: ${childId}.`);
+        } else {
+            console.log(`[WS_FIND] WebSocket ENCONTRADO, mas FECHADO ou não aberto para childId: ${childId}. readyState: ${childWs.readyState}`);
+        }
         res.status(404).send(`Nenhuma conexão WebSocket ativa encontrada para o filho: ${childId}.`);
     }
 });
@@ -271,8 +281,9 @@ function createWavHeader(dataSize) {
 }
 
 // --- WebSocket Handling ---
-wss.on('connection', ws => {
-    console.log('[WS] Novo cliente conectado.');
+wss.on('connection', (ws, req) => {
+    // req.url conterá o caminho da conexão WebSocket, e esperamos '/audio-stream'
+    console.log(`[WS] Novo cliente conectado no caminho: ${req.url}`);
 
     ws.on('message', message => {
         // Tenta parsear como JSON para comandos ou sinalização
@@ -311,6 +322,7 @@ wss.on('connection', ws => {
                 });
             } else {
                 // console.log('[WS] Mensagem de texto ou binária não tratada:', message.toString().substring(0, 50) + '...');
+                console.warn('[WS] Mensagem binária/não-JSON de cliente não reconhecido ou sem listener ativo.');
             }
         }
     });
