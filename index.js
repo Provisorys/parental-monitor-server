@@ -170,27 +170,36 @@ app.post('/location-update', async (req, res) => {
     const { childId, latitude, longitude, timestamp } = req.body;
 
     if (!childId || latitude === undefined || longitude === undefined || timestamp === undefined) {
-        console.warn('[LOCATION_UPDATE_ERROR] Dados de localização incompletos:', req.body);
-        return res.status(400).send('Dados de localização incompletos. Requer childId, latitude, longitude, timestamp.');
+        console.error('[LOCATION_UPDATE_ERROR] Dados de localização incompletos:', req.body);
+        return res.status(400).send('Dados de localização incompletos.');
     }
 
+    // --- CORREÇÃO: GARANTINDO AMBAS AS CHAVES PRIMÁRIAS COM OS NOMES CORRETOS ---
     const params = {
         TableName: DYNAMODB_TABLE_LOCATIONS,
         Item: {
-            childId: childId,
-            timestamp: timestamp,
+            // AQUI: 'childId' é a Partition Key (chave de partição)
+            childId: childId, // Usamos o childId recebido na requisição como valor para a Partition Key 'childId'
+            // AQUI: 'timestamp' é a Sort Key (chave de classificação/ordenamento)
+            timestamp: timestamp, // Usamos o timestamp recebido do cliente como Sort Key
+            
+            // Outros atributos do item que você queira salvar
             latitude: latitude,
-            longitude: longitude,
-            recordedAt: new Date(timestamp).toISOString()
+            longitude: longitude
+            // O timestamp já é a Sort Key, então não precisa ser duplicado a menos que você queira por algum motivo específico.
         }
     };
 
     try {
         await docClient.put(params).promise();
-        console.log(`[LOCATION_UPDATE_SUCCESS] Localização para ${childId} salva com sucesso no DynamoDB.`);
-        res.status(200).send('Localização salva com sucesso.');
+        console.log('[LOCATION_UPDATE_DB_SUCCESS] Localização salva no DynamoDB com sucesso.');
+        res.status(200).send('Localização recebida e salva.');
     } catch (error) {
-        console.error('[LOCATION_UPDATE_DB_ERROR] Erro ao salvar localização no DynamoDB:', error);
+        console.error('[LOCATION_UPDATE_DB_ERROR] Erro ao salvar localização no DynamoDB:', error.message);
+        // Log detalhado do erro AWS para depuração
+        if (error.code && error.statusCode) {
+             console.error(`AWS Error: Code - ${error.code}, Status - ${error.statusCode}, RequestId - ${error.requestId}`);
+        }
         res.status(500).send('Erro interno do servidor ao salvar localização.');
     }
 });
