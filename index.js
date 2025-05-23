@@ -324,6 +324,29 @@ app.post('/stop-microphone', async (req, res) => {
     res.status(200).send(`Comando STOP_AUDIO_STREAMING enviado para ${childId}.`);
 });
 
+// NOVO: Rota para obter os IDs dos filhos
+app.get('/get-child-ids', async (req, res) => {
+    console.log(`[HTTP_REQUEST] Requisição recebida: GET /get-child-ids`);
+    try {
+        const params = {
+            TableName: DYNAMODB_TABLE_CHILDREN
+        };
+        const data = await docClient.scan(params).promise();
+        const childIds = data.Items.map(item => item.childId);
+
+        // Adiciona filhos conectados via WebSocket que podem não estar no DynamoDB ainda
+        const connectedChildIds = Array.from(activeChildWebSockets.keys());
+        const combinedChildIds = Array.from(new Set([...childIds, ...connectedChildIds])); // Remove duplicatas
+
+        console.log(`[HTTP_RESPONSE] Enviando ${combinedChildIds.length} IDs de filhos.`);
+        res.status(200).json({ childIds: combinedChildIds });
+    } catch (error) {
+        console.error('[HTTP_ERROR] Erro ao obter child IDs do DynamoDB:', error);
+        res.status(500).send('Erro ao obter child IDs.');
+    }
+});
+
+
 // Rota para upload de mensagens (WhatsApp, etc.)
 app.post('/messages', upload.single('media'), async (req, res) => {
     console.log(`[HTTP_REQUEST] Requisição recebida: POST /messages`);
@@ -374,17 +397,21 @@ app.post('/messages', upload.single('media'), async (req, res) => {
         await docClient.put(params).promise();
         console.log('[DYNAMODB] Mensagem salva com sucesso no DynamoDB.');
 
-        // Notificar pai via WebSocket se estiver conectado e ouvindo
-        const parentWs = parentControlSockets.get(ws.parentId); // Se o pai estiver conectado para notificações gerais
-        if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-            parentWs.send(JSON.stringify({
-                type: 'NEW_MESSAGE',
-                message: {
-                    childId, type, sender, content, timestamp, contactOrGroup, mediaUrl
-                }
-            }));
-            console.log(`[NOTIFICATIONS] Nova mensagem de ${childId} para ${parentWs.parentId} via WebSocket.`);
-        }
+        // Notificar pai via WebSocket se estiver conectado e ouvindo (para notificações gerais)
+        // Isso assume que o pai tem uma conexão 'parentControlSockets' para receber notificações
+        const parentWsList = Array.from(parentControlSockets.values());
+        parentWsList.forEach(parentWs => {
+            if (parentWs.readyState === WebSocket.OPEN) {
+                parentWs.send(JSON.stringify({
+                    type: 'NEW_MESSAGE_NOTIFICATION', // Tipo de notificação para o pai
+                    data: {
+                        childId, type, sender, content, timestamp, contactOrGroup, mediaUrl
+                    }
+                }));
+                console.log(`[NOTIFICATIONS] Nova mensagem de ${childId} notificada para pai ${parentWs.parentId} via WebSocket.`);
+            }
+        });
+
 
         res.status(200).send('Mensagem recebida e salva.');
     } catch (dbError) {
