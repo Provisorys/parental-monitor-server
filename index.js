@@ -228,7 +228,7 @@ wss.on('connection', ws => {
                         }
 
                         const locationItem = {
-                            locationId: uuidv4(),
+                            indi1: uuidv4(),
                             childId: childId,
                             latitude: latitude,
                             longitude: longitude,
