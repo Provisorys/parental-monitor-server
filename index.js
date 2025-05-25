@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT;
 const upload = multer();
 
 // --- AWS CONFIG ---
@@ -28,7 +28,6 @@ const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
 const wsClientsMap = new Map(); // Mapa para armazenar clientes WebSocket
-
 
 // --- TWILIO CONFIG ---
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
