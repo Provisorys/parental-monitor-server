@@ -462,8 +462,6 @@ app.get('/twilio-token', (req, res) => {
     }
 });
 
-// --- WebSocket Server ---
-const wss = new WebSocket.Server({ server });
 
 wss.on('connection', function connection(ws, req) {
     console.log('Cliente WebSocket conectado!');
