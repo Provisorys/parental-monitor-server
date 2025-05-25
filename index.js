@@ -23,17 +23,17 @@ const s3 = new AWS.S3();
 
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Usando sua tabela existente
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
 // --- TWILIO CONFIG ---
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
-const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET; // CORRIGIDO AQUI!
-const TWILIO_APP_SID = process.env.TWILIO_APP_SID; // Certifique-se que esta também esteja definida
+const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
+const TWILIO_APP_SID = process.env.TWILIO_APP_SID;
 
-const twilioClient = twilio(TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, { accountSid: TWILIO_ACCOUNT_SID }); // E AQUI!
+const twilioClient = twilio(TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, { accountSid: TWILIO_ACCOUNT_SID });
 
 // --- MIDDLEWARES ---
 app.use(cors());
@@ -57,7 +57,7 @@ app.get('/twilio-token', (req, res) => {
         const token = new AccessToken(
             TWILIO_ACCOUNT_SID,
             TWILIO_API_KEY_SID,
-            TWILIO_API_KEY_SECRET, // CORRIGIDO AQUI!
+            TWILIO_API_KEY_SECRET,
             { identity: identity }
         );
         token.addGrant(voiceGrant);
@@ -170,7 +170,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     }
 });
 
-// Nova rota HTTP para o aplicativo pai requisitar a localização
+// Rota HTTP para o aplicativo pai requisitar a localização
 app.post('/request-current-location/:childId', (req, res) => {
     const childId = req.params.childId;
     console.log(`[HTTP_REQUEST] Recebido pedido de localização para childId: ${childId}`);
@@ -184,8 +184,29 @@ app.post('/request-current-location/:childId', (req, res) => {
         res.status(200).send(`Comando de localização enviado para ${childId}.`);
     } else {
         console.warn(`[HTTP_WARNING] ChildId ${childId} não encontrado ou WebSocket não está conectado/aberto.`);
-        // Se o WebSocket não estiver conectado, o pai pode tentar novamente ou notificar o usuário
         res.status(404).send(`ChildId ${childId} não encontrado ou não conectado via WebSocket.`);
+    }
+});
+
+// NOVA ROTA: Rota HTTP para listar childIds registrados
+app.get('/get-child-ids', async (req, res) => {
+    console.log('[HTTP_REQUEST] Recebido pedido para listar childIds.');
+
+    const params = {
+        TableName: DYNAMODB_TABLE_CONVERSATIONS,
+        ProjectionExpression: 'childId' // Pede apenas o atributo childId
+    };
+
+    try {
+        const data = await docClient.scan(params).promise();
+        // Usa um Set para garantir que cada childId apareça apenas uma vez
+        const childIds = [...new Set(data.Items.map(item => item.childId))];
+
+        console.log(`[DYNAMODB] childIds encontrados na tabela ${DYNAMODB_TABLE_CONVERSATIONS}:`, childIds);
+        res.status(200).json(childIds);
+    } catch (error) {
+        console.error('[DYNAMODB_ERROR] Erro ao buscar childIds da tabela Conversations:', error);
+        res.status(500).send('Erro interno do servidor ao listar childIds.');
     }
 });
 
@@ -228,7 +249,7 @@ wss.on('connection', ws => {
                         }
 
                         const locationItem = {
-                            indi1: uuidv4(),
+                            indi1: uuidv4(), // CORREÇÃO APLICADA: Adicionando a Partition Key 'indi1'
                             childId: childId,
                             latitude: latitude,
                             longitude: longitude,
@@ -250,7 +271,7 @@ wss.on('connection', ws => {
                         }
                         break;
 
-                    case 'REQUEST_CURRENT_LOCATION_COMMAND': // Esta lógica é para comandos recebidos via WebSocket
+                    case 'REQUEST_CURRENT_LOCATION_COMMAND':
                         const targetChildId = data.childId;
                         if (targetChildId) {
                             const childWs = connectedChildren.get(targetChildId);
