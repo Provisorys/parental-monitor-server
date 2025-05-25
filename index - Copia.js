@@ -600,64 +600,6 @@ wss.on('connection', ws => {
     });
 });
 
-// Rota para receber dados de localização do filho (APP FILHO -> SERVIDOR)
-app.post('/location', async (req, res) => {
-    console.log('[HTTP_REQUEST] Requisição recebida: POST /location');
-    const { childId, latitude, longitude, timestamp } = req.body;
-
-    if (!childId || latitude === undefined || longitude === undefined || !timestamp) {
-        console.warn('[HTTP_ERROR] Dados de localização incompletos:', req.body);
-        return res.status(400).send('Dados de localização incompletos. Requer childId, latitude, longitude e timestamp.');
-    }
-
-    const locationData = {
-        // Mantenha ou ajuste isso com base na sua tabela GPSintegracao.
-        // Se 'indi1' for a Partition Key, use: indi1: childId,
-        indi1: childId,
-		childId: childId,
-        timestamp: timestamp,
-        latitude: latitude,
-        longitude: longitude,
-    };
-
-    const params = {
-        TableName: DYNAMODB_TABLE_LOCATIONS,
-        Item: locationData
-    };
-
-    try {
-        await docClient.put(params).promise();
-        console.log(`[DYNAMODB] Localização de ${childId} salva com sucesso.`);
-
-        const messageToParents = JSON.stringify({
-            type: 'location_update',
-            childId: childId,
-            latitude: latitude,
-            longitude: longitude,
-            timestamp: timestamp
-        });
-
-        wsClientsMap.forEach((ws, clientId) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (clientId.startsWith('parent_')) {
-                    try {
-                        ws.send(messageToParents);
-                        console.log(`[WS] Localização enviada para cliente WS pai (ID: ${clientId}).`);
-                    } catch (wsError) {
-                        console.error('[WS_ERROR] Erro ao enviar mensagem WS para pai:', wsError);
-                    }
-                }
-            }
-        });
-
-        res.status(200).send('Localização recebida e salva com sucesso.');
-
-    } catch (error) {
-        console.error('[DYNAMODB_ERROR] Erro ao salvar localização no DynamoDB:', error);
-        res.status(500).send('Erro ao processar localização.');
-    }
-});
-
 // --- ERROS ---
 app.use((req, res) => {
     console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`); // Log
