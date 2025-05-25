@@ -21,10 +21,10 @@ AWS.config.update({
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-const DYNAMODB_TABLE_CHILDREN = 'Children';
+const DYNAMODB_TABLE_CHILDREN = 'Children'; // Mantido como está no seu código
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Usando sua tabela existente
+const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations'; // Sua tabela de conversas
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Sua tabela de localização
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
 // --- TWILIO CONFIG ---
@@ -49,7 +49,7 @@ const connectedChildren = new Map(); // childId -> WebSocket
 
 // --- HTTP ROUTES ---
 
-// Rota para registrar um novo filho
+// Rota para registrar um novo filho (Mantido como está no seu código)
 app.post('/register-child', async (req, res) => {
     const { childId, childName } = req.body;
 
@@ -76,10 +76,12 @@ app.post('/register-child', async (req, res) => {
     }
 });
 
-// Rota para obter todos os childIds registrados
+// Rota para obter todos os childIds registrados (Mantido como está no seu código)
+// *** Importante: Esta rota ainda consulta a tabela 'Children'.
+// *** Se você quiser que ela use 'Conversations', precisará modificar a lógica aqui.
 app.get('/get-child-ids', async (req, res) => {
     const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN,
+        TableName: DYNAMODB_TABLE_CHILDREN, // Pelo seu comentário, essa será a tabela a mudar para 'Conversations'
         ProjectionExpression: 'childId'
     };
 
@@ -104,22 +106,24 @@ app.post('/request-current-location/:childId', async (req, res) => {
     const childWs = connectedChildren.get(childId);
     if (childWs && childWs.readyState === WebSocket.OPEN) {
         try {
+            // Envia uma mensagem WebSocket para o aplicativo filho solicitando a localização
             childWs.send(JSON.stringify({ type: 'REQUEST_CURRENT_LOCATION' }));
             console.log(`[WEBSOCKET] Mensagem REQUEST_CURRENT_LOCATION enviada para ${childId}.`);
             res.status(200).send({ message: 'Solicitação de localização enviada.' });
         } catch (error) {
             console.error(`[WEBSOCKET_ERROR] Erro ao enviar REQUEST_CURRENT_LOCATION para ${childId}:`, error);
-            res.status(500).send({ message: 'Erro ao enviar solicitação para o dispositivo filho.' });
+            res.status(500).send({ message: 'Erro interno do servidor ao enviar solicitação para o dispositivo filho.' });
         }
     } else {
         console.warn(`[CHILD_STATUS] Dispositivo filho ${childId} não conectado via WebSocket.`);
+        // Retorna 404 se o filho não estiver online para receber a solicitação
         res.status(404).send({ message: 'Dispositivo filho não conectado ou não encontrado.' });
     }
 });
 // =====================================================================
 
 
-// Rota para enviar mensagens (HTTP)
+// Rota para enviar mensagens (HTTP) - Mantido como está no seu código
 app.post('/send-message', async (req, res) => {
     const { fromChildId, toChildId, messageContent, type } = req.body;
     const timestamp = new Date().toISOString();
@@ -154,7 +158,7 @@ app.post('/send-message', async (req, res) => {
                 fromChildId,
                 toChildId,
                 messageContent,
-                messageType: type, // Usando messageType para evitar conflito com 'type' do WS
+                messageType: type,
                 timestamp
             }));
             console.log(`[WEBSOCKET] Mensagem enviada via WebSocket para ${toChildId}.`);
@@ -169,7 +173,7 @@ app.post('/send-message', async (req, res) => {
     }
 });
 
-// Rota para obter o histórico de mensagens entre dois filhos
+// Rota para obter o histórico de mensagens entre dois filhos (Mantido como está no seu código)
 app.get('/get-message-history/:child1Id/:child2Id', async (req, res) => {
     const { child1Id, child2Id } = req.params;
 
@@ -215,8 +219,7 @@ app.get('/get-message-history/:child1Id/:child2Id', async (req, res) => {
     }
 });
 
-// =====================================================================
-// Rota para upload de mídias (áudio/imagem/vídeo)
+// Rota para upload de mídias (áudio/imagem/vídeo) - Mantido como está no seu código
 app.post('/upload-media', upload.single('media'), async (req, res) => {
     const { fromChildId, toChildId, mediaType, messageId } = req.body;
     const file = req.file;
@@ -277,7 +280,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     }
 });
 
-// Rota para obter presigned URL de upload para mídias (se o app usa isso em vez de upload direto)
+// Rota para obter presigned URL de upload para mídias (se o app usa isso em vez de upload direto) - Mantido como está no seu código
 app.post('/get-presigned-url', async (req, res) => {
     const { fileName, fileType, childId, messageId } = req.body; // childId é o remetente
     if (!fileName || !fileType || !childId || !messageId) {
@@ -303,7 +306,7 @@ app.post('/get-presigned-url', async (req, res) => {
 });
 
 
-// Rota para enviar SMS via Twilio (para app pai ou avisos)
+// Rota para enviar SMS via Twilio (para app pai ou avisos) - Mantido como está no seu código
 app.post('/send-sms', async (req, res) => {
     const { to, message } = req.body;
     if (!to || !message) {
@@ -366,6 +369,7 @@ wss.on('connection', ws => {
 
                         // =========================================================
                         // AJUSTE: ENVIAR LOCALIZAÇÃO PARA O APP PAI VIA WEBSOCKET
+                        // (Garantindo que esta parte seja a única modificada aqui)
                         // =========================================================
                         wss.clients.forEach(function each(client) {
                             // Envia para *todos* os clientes conectados que não são o próprio remetente (app filho)
@@ -391,10 +395,6 @@ wss.on('connection', ws => {
                     break;
 
                 // Outros tipos de mensagem WebSocket (se houver, como NEW_MESSAGE_ACK, etc.)
-                // case 'ACK':
-                //     console.log(`ACK recebido de ${parsedMessage.childId}`);
-                //     break;
-
                 default:
                     console.log(`[WEBSOCKET_WARNING] Tipo de mensagem desconhecido: ${parsedMessage.type}`);
                     break;
@@ -419,19 +419,19 @@ wss.on('connection', ws => {
     });
 });
 
-// Middleware para tratamento de rotas não encontradas (404)
+// Middleware para tratamento de rotas não encontradas (404) - Mantido como está no seu código
 app.use((req, res) => {
-    console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`); // Log
+    console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`);
     res.status(404).send('Rota não encontrada');
 });
 
-// Middleware de tratamento de erros global
+// Middleware de tratamento de erros global - Mantido como está no seu código
 app.use((err, req, res, next) => {
     console.error('[HTTP_ERROR] Erro de servidor:', err);
     res.status(500).send('Erro interno do servidor.');
 });
 
-// --- INICIO ---
+// --- INICIO --- - Mantido como está no seu código
 server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Servidor rodando na porta ${PORT || 10000}`);
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
