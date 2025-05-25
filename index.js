@@ -275,6 +275,7 @@ app.post('/location', async (req, res) => {
     }
 
     const locationData = {
+	indi1: childId,
         childId: childId,
         timestamp: timestamp, // Chave de ordenação
         latitude: latitude,
