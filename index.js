@@ -167,6 +167,48 @@ wssCommands.on('connection', (ws, req) => {
     ws.on('error', error => console.error('[WS_COMMAND_ERROR]', error));
 });
 
+// Rota de registro de filho via HTTP
+app.post('/registerChild', async (req, res) => {
+    // ... (código existente da rota /registerChild) ...
+});
+
+// Nova rota para obter IDs de filhos associados a um pai
+app.get('/get-child-ids', async (req, res) => {
+    console.log('[HTTP_REQUEST] Requisição recebida: GET /get-child-ids');
+    const { parentId } = req.query; // Pega o parentId dos query parameters
+
+    if (!parentId) {
+        console.warn('[HTTP_ERROR] parentId não fornecido para /get-child-ids');
+        return res.status(400).send('O parâmetro parentId é necessário.');
+    }
+
+    const params = {
+        TableName: DYNAMODB_TABLE_CONVERSATIONS, // Tabela onde os filhos são registrados
+        KeyConditionExpression: 'parentId = :pId', // Expressão de consulta
+        ExpressionAttributeValues: {
+            ':pId': parentId
+        }
+    };
+
+    try {
+        const data = await docClient.query(params).promise();
+        const children = data.Items.map(item => ({
+            childId: item.childId,
+            childName: item.childName,
+            // Adicione outros campos do filho que você queira retornar
+            childImage: item.childImage || null,
+            childToken: item.childToken || null, // Se você quiser o token de notificação
+        }));
+
+        console.log(`[DYNAMODB] ${children.length} filhos encontrados para o pai ${parentId}.`);
+        res.status(200).json(children);
+
+    } catch (error) {
+        console.error('[DYNAMODB_ERROR] Erro ao buscar filhos no DynamoDB:', error);
+        res.status(500).send('Erro ao buscar IDs de filhos.');
+    }
+});
+
 // --- ROTAS HTTP ---
 app.use(bodyParser.json());
 app.use(cors()); // Configure CORS adequadamente para sua aplicação
