@@ -21,7 +21,6 @@ AWS.config.update({
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-const DYNAMODB_TABLE_CHILDREN = 'Children';
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
@@ -617,8 +616,7 @@ server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
     console.log(`Bucket S3 configurado via env: ${process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'}`);
     console.log(`AWS Access Key ID configurada via env: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
-    console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
-    console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
+    console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);    
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
     console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
