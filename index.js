@@ -21,9 +21,17 @@ AWS.config.update({
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
+
+const wsClientsMap = new Map();
+
+// --- Rotas HTTP ---
+app.use(bodyParser.json());
+app.use(cors()); // Configure CORS adequadamente para sua aplicação
+app.use(upload.array()); // Para lidar com form-data se necessário
 
 // --- TWILIO CONFIG ---
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
@@ -48,6 +56,162 @@ app.get('/', (req, res) => {
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 20 * 1024 * 1024 }
+});
+
+// Rota para SOLICITAR a localização atual do dispositivo filho
+// Este endpoint é chamado pelo PAINEL DE CONTROLE ou outro cliente que deseja saber a localização do filho
+app.post('/request-current-location/:childId', async (req, res) => {
+    const { childId } = req.params;
+    console.log(`[LOCATION_REQUEST] Recebida requisição para localização de childId: ${childId}`);
+
+    // Tenta encontrar o cliente WebSocket associado a este childId
+    const targetClient = wsClientsMap.get(childId);
+
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+        const command = {
+            type: 'REQUEST_LOCATION',
+            childId: childId,
+            timestamp: Date.now()
+        };
+        try {
+            targetClient.send(JSON.stringify(command));
+            console.log(`[LOCATION_REQUEST] Comando REQUEST_LOCATION enviado via WebSocket para ${childId}`);
+            res.status(200).send({ message: `Comando de localização enviado para ${childId}` });
+        } catch (error) {
+            console.error(`[LOCATION_REQUEST] Erro ao enviar comando via WebSocket para ${childId}:`, error);
+            res.status(500).send({ message: `Erro ao enviar comando de localização.`, error: error.message });
+        }
+    } else {
+        console.warn(`[LOCATION_REQUEST] Cliente WebSocket para childId ${childId} não encontrado ou não conectado.`);
+        res.status(404).send({ message: `Dispositivo ${childId} não conectado via WebSocket.` });
+    }
+});
+
+// Nova rota para receber dados de localização do filho (APP FILHO -> SERVIDOR)
+app.post('/location', async (req, res) => {
+    console.log('[HTTP_REQUEST] Requisição recebida: POST /location');
+    const { childId, latitude, longitude, timestamp } = req.body;
+
+    if (!childId || latitude === undefined || longitude === undefined || !timestamp) {
+        console.warn('[HTTP_ERROR] Dados de localização incompletos:', req.body);
+        return res.status(400).send('Dados de localização incompletos. Requer childId, latitude, longitude e timestamp.');
+    }
+
+    const locationData = {
+        childId: childId,
+        timestamp: timestamp, // Chave de ordenação
+        latitude: latitude,
+        longitude: longitude,
+        // Você pode adicionar um ID único para cada entrada se precisar de mais granularidade
+        // id: uuidv4(),
+    };
+
+    const params = {
+        TableName: DYNAMODB_TABLE_LOCATIONS,
+        Item: locationData
+    };
+
+    try {
+        await docClient.put(params).promise();
+        console.log(`[DYNAMODB] Localização de ${childId} salva com sucesso.`);
+
+        // --- Lógica para enviar a localização para o aplicativo pai via WebSocket ---
+        // Itera sobre todos os clientes WebSocket conectados para encontrar os pais
+        // (Assumindo que você tem uma forma de identificar que um WS pertence a um app pai)
+        // Por exemplo, se a conexão do pai usa um childId para monitorar.
+        // Ou se o app pai se conecta com um parentId específico.
+
+        // Para simplificar agora, vamos enviar para todos os clientes conectados
+        // que podem estar monitorando comandos. No entanto, o ideal seria
+        // ter um mapa de `parentId -> [wsClient]` para enviar apenas para os pais relevantes.
+        // Por enquanto, vamos enviar para todos os clientes de comando WebSocket
+        // que podem estar escutando para 'location_update'.
+
+        const messageToParents = JSON.stringify({
+            type: 'location_update',
+            childId: childId,
+            latitude: latitude,
+            longitude: longitude,
+            timestamp: timestamp
+        });
+
+        // Envia a atualização de localização para todos os clientes WebSocket de comando
+        // (assumindo que wsClientsMap armazena clientes de comando)
+        wsClientsMap.forEach((ws, clientId) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                // Aqui, você precisaria de uma lógica mais robusta para saber se o cliente
+                // é um aplicativo pai e se está monitorando este childId específico.
+                // Por exemplo, se você tem um mapa { parentId: wsClient } ou se a URL do WS do pai
+                // inclui o ID do filho que ele está monitorando.
+                // Por agora, vamos enviar para todos os clientes de comando (potenciais pais).
+                try {
+                    ws.send(messageToParents);
+                    console.log(`[WS] Localização enviada para cliente WS (ID: ${clientId}).`);
+                } catch (wsError) {
+                    console.error('[WS_ERROR] Erro ao enviar mensagem WS:', wsError);
+                }
+            }
+        });
+
+
+        res.status(200).send('Localização recebida e salva com sucesso.');
+
+    } catch (error) {
+        console.error('[DYNAMODB_ERROR] Erro ao salvar localização no DynamoDB:', error);
+        res.status(500).send('Erro ao processar localização.');
+    }
+});
+
+// Rota para RECEBER a localização atual do aplicativo filho
+// Este endpoint é chamado pelo APLICATIVO FILHO quando ele obtém a localização
+app.post('/api/location', async (req, res) => {
+    try {
+        const { childId, latitude, longitude, timestamp } = req.body;
+
+        if (!childId || latitude === undefined || longitude === undefined || !timestamp) {
+            console.warn('[LOCATION_UPDATE] Dados de localização incompletos:', req.body);
+            return res.status(400).send('Dados de localização incompletos.');
+        }
+
+        const params = {
+            TableName: DYNAMODB_TABLE_LOCATIONS,
+            Item: {
+                childId: childId,
+                timestamp: timestamp,
+                latitude: latitude,
+                longitude: longitude,
+                // Adicione aqui outros campos que você possa querer armazenar
+                // como precisão, velocidade, etc.
+                createdAt: Date.now() // Timestamp do servidor para registro
+            }
+        };
+
+        await docClient.put(params).promise();
+        console.log(`[LOCATION_UPDATE] Localização de ${childId} salva no DynamoDB: Lat ${latitude}, Lng ${longitude}`);
+
+        // Opcional: Notificar clientes WebSocket (ex: painel de controle) sobre a nova localização
+        // Isso é útil se você tiver um frontend que exiba a localização em tempo real
+        wss.clients.forEach(function each(client) {
+            // Se você tiver uma forma de identificar clientes "pai" (ex: client.type === 'parent-app')
+            // Você pode enviar a atualização apenas para eles.
+            // Por enquanto, vou enviar para todos os clientes conectados.
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({
+                    type: 'LOCATION_UPDATE',
+                    childId: childId,
+                    latitude: latitude,
+                    longitude: longitude,
+                    timestamp: timestamp
+                }));
+            }
+        });
+
+        res.status(200).send('Localização recebida e salva com sucesso.');
+
+    } catch (error) {
+        console.error('[LOCATION_UPDATE] Erro ao salvar localização:', error);
+        res.status(500).send('Erro interno do servidor ao salvar localização.');
+    }
 });
 
 // --- ROTAS DE API ---
@@ -296,6 +460,51 @@ app.get('/twilio-token', (req, res) => {
         console.error('[TWILIO] Erro ao gerar token Twilio:', error);
         res.status(500).json({ error: 'Erro ao gerar token Twilio', details: error.message });
     }
+});
+
+// --- WebSocket Server ---
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', function connection(ws, req) {
+    console.log('Cliente WebSocket conectado!');
+
+    // Evento de recebimento de mensagem do cliente
+    ws.on('message', function incoming(message) {
+        try {
+            const parsedMessage = JSON.parse(message);
+            // Se a mensagem for do tipo REGISTER_CHILD, associa o childId à conexão WebSocket
+            if (parsedMessage.type === 'REGISTER_CHILD' && parsedMessage.childId) {
+                ws.childId = parsedMessage.childId; // <--- CHAVE PARA IDENTIFICAR O CLIENTE
+                wsClientsMap.set(ws.childId, ws); // Adiciona ao mapa
+                console.log(`[WS] Cliente registrado com childId: ${ws.childId}`);
+                // Opcional: Enviar uma confirmação ao cliente
+                ws.send(JSON.stringify({ type: 'REGISTRATION_SUCCESS', message: 'ChildId registrado com sucesso.' }));
+            }
+            // Adicione aqui outros tipos de mensagens que você espera do cliente WebSocket (ex: heartbeat)
+            // if (parsedMessage.type === 'HEARTBEAT') { ... }
+            // if (parsedMessage.type === 'AUDIO_CHUNK_CONTROL') { ... } // se usar WS para controle de áudio
+        } catch (error) {
+            console.error('[WS] Erro ao processar mensagem do WebSocket:', error);
+        }
+    });
+
+    // Evento de fechamento da conexão
+    ws.on('close', () => {
+        if (ws.childId) {
+            console.log(`[WS] Cliente com childId ${ws.childId} desconectado.`);
+            wsClientsMap.delete(ws.childId); // Remove do mapa ao desconectar
+        } else {
+            console.log('[WS] Cliente WebSocket desconectado (childId desconhecido).');
+        }
+    });
+
+    // Evento de erro da conexão
+    ws.on('error', (error) => {
+        console.error('[WS] Erro no WebSocket:', error);
+    });
+
+    // Opcional: Enviar uma mensagem inicial para o cliente após a conexão
+    // ws.send(JSON.stringify({ type: 'CONNECTED', message: 'Servidor conectado.' }));
 });
 
 // --- WEBSOCKET SERVER ---
