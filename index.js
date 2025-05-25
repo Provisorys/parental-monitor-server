@@ -275,7 +275,8 @@ app.post('/location', async (req, res) => {
     const locationData = {
         // Mantenha ou ajuste isso com base na sua tabela GPSintegracao.
         // Se 'indi1' for a Partition Key, use: indi1: childId,
-        childId: childId,
+        indi1: childId,
+		childId: childId,
         timestamp: timestamp,
         latitude: latitude,
         longitude: longitude,
