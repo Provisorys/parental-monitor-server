@@ -262,6 +262,39 @@ app.post('/send-command', async (req, res) => {
     }
 });
 
+// --- ROTA RESTAURADA: GET /get-child/:childId ---
+app.get('/get-child-ids/:childId', async (req, res) => {
+    console.log('[HTTP_REQUEST] Requisição recebida: GET /get-child-ids/:childId');
+    const { childId } = req.params;
+
+    if (!childId) {
+        console.warn('[HTTP_ERROR] childId não fornecido na requisição GET /get-child-ids.');
+        return res.status(400).send('childId é obrigatório.');
+    }
+
+    try {
+        const params = {
+            TableName: 'Children', // Supondo que você tem uma tabela 'Children'
+            Key: {
+                childId: childId
+            }
+        };
+        const data = await docClient.get(params).promise();
+
+        if (data.Item) {
+            console.log(`[DYNAMODB] Dados do filho ${childId} recuperados com sucesso.`);
+            res.status(200).json(data.Item);
+        } else {
+            console.log(`[DYNAMODB] Filho ${childId} não encontrado.`);
+            res.status(404).send('Filho não encontrado.');
+        }
+    } catch (error) {
+        console.error('[DYNAMODB_ERROR] Erro ao obter dados do filho:', error);
+        res.status(500).send('Erro ao obter dados do filho.');
+    }
+});
+
+
 // --- WEBSOCKET SERVER ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/audio-stream' });
@@ -456,7 +489,6 @@ wss.on('connection', ws => {
                     // Se for um comando de texto, processe como se fosse uma string.
                     // Isso evita duplicar a lógica de tratamento de comandos.
                     // Recurse a função ou chame a lógica específica aqui, ou refatore.
-                    // Para simplificar e evitar recursão, vamos refatorar para chamar a lógica existente.
                     // Como estamos dentro do `ws.on('message')`, podemos chamar a lógica diretamente.
 
                     if (decodedMessage.startsWith('CHILD_ID:')) {
