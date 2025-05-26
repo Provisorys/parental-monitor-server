@@ -262,13 +262,13 @@ app.post('/send-command', async (req, res) => {
     }
 });
 
-// --- ROTA GET /get-child/:childId ---
-app.get('/get-child/:childId', async (req, res) => {
-    console.log('[HTTP_REQUEST] Requisição recebida: GET /get-child/:childId');
+// --- ROTA GET /get-child-ids ---
+app.get('/get-child-ids/:childId', async (req, res) => {
+    console.log('[HTTP_REQUEST] Requisição recebida: GET /get-child-ids/:childId');
     const { childId } = req.params;
 
     if (!childId) {
-        console.warn('[HTTP_ERROR] childId não fornecido na requisição GET /get-child.');
+        console.warn('[HTTP_ERROR] childId não fornecido na requisição GET /get-child-ids.');
         return res.status(400).send('childId é obrigatório.');
     }
 
@@ -298,7 +298,7 @@ app.get('/get-child/:childId', async (req, res) => {
 // --- WEBSOCKET SERVER ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/audio-stream' });
-const wssCommands = new WebSocket.Server({ server, path: '/ws-commands' }); // Mantido como você solicitou
+const wssCommands = new WebSocket.Server({ server, path: '/ws-commands' });
 
 const parentListeningSockets = new Map(); // Mapa: childId -> WebSocket do pai que está ouvindo
 const activeChildWebSockets = new Map(); // Mapa: childId -> WebSocket do filho ativo
