@@ -458,7 +458,10 @@ app.get('/get-child-ids', async (req, res) => {
 
         const childIdsArray = Array.from(uniqueChildIds);
         console.log(`[GET_CHILD_IDS] ${childIdsArray.length} childIDs únicos encontrados no DynamoDB (tabela Conversations): [ ${childIdsArray.join(', ')} ]`);
-        res.status(200).json({ childIds: childIdsArray });
+        
+        // --- AQUI ESTÁ A MUDANÇA CRUCIAL ---
+        res.status(200).json(childIdsArray); // Retorna APENAS o array de strings
+        // ------------------------------------
 
     } catch (error) {
         console.error('[SERVER_ERROR] Erro ao buscar child IDs no DynamoDB:', error);
