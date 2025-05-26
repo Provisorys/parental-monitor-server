@@ -320,6 +320,20 @@ function findChildWebSocket(childId) {
     return null;
 }
 
+server.on('upgrade', (request, socket, head) => {
+    // MUDE ESTA LINHA:
+    if (request.url === '/') { // <<< DEIXE APENAS A BARRA. A Render.com pode estar mapeando para a raiz.
+        wss.handleUpgrade(request, socket, head, ws => {
+            wss.emit('connection', ws, request);
+            console.log('[WS_UPGRADE] Conexão WebSocket no / estabelecida.'); // Mude o log tbm
+        });
+    } else {
+        // Mantenha este console.warn para ver as URLs rejeitadas.
+        console.warn(`[WS_UPGRADE_REJECT] Tentativa de conexão WebSocket em rota inválida: ${request.url}`);
+        socket.destroy(); 
+    }
+});
+
 // --- NOVAS ROTAS PARA LIGAR/DESLIGAR MICROFONE (via HTTP do app pai) ---
 app.post('/start-microphone', async (req, res) => {
     const { childId } = req.body;
@@ -680,6 +694,7 @@ server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);    
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
+	console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`);
     console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key SID configurada via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim' : 'Não'}`);
