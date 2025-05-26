@@ -116,11 +116,11 @@ app.post('/register-child', async (req, res) => {
 
 
 // Rota para obter IDs de filhos associados a um pai
-app.get('/get-child-ids/:parentId', async (req, res) => {
-    const { parentId } = req.params;
+app.get('/get-child-ids', async (req, res) => { // REMOVIDO o :parentId da URL
+    const { parentId } = req.query; // AGORA PEGA DO req.query
 
     if (!parentId) {
-        return res.status(400).send('Parent ID é obrigatório.');
+        return res.status(400).send('Parent ID é obrigatório como query parameter (ex: ?parentId=seuID).');
     }
 
     try {
