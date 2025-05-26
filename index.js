@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT;
-const upload = multer();
+const upload = multer(); // Instancia o multer, mas não aplica globalmente aqui
 
 // --- AWS CONFIG ---
 AWS.config.update({
@@ -30,19 +30,12 @@ const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-pr
 const wsClientsMap = new Map(); // Mapa para armazenar clientes WebSocket
 
 // --- Rotas HTTP ---
-app.use(bodyParser.json());
+app.use(bodyParser.json()); // Para JSON bodies
+app.use(bodyParser.urlencoded({ extended: true })); // Para URL-encoded bodies (se necessário)
 app.use(cors()); // Configure CORS adequadamente para sua aplicação
-app.use(upload.array()); // Para lidar com form-data se necessário
-
-// --- TWILIO CONFIG ---
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
-const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
-
-const twilioClient = twilio(TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, { accountSid: TWILIO_ACCOUNT_SID });
 
 // Rota para receber arquivos de áudio
+// Aplica o multer.single('audio') APENAS nesta rota POST
 app.post('/upload-audio', upload.single('audio'), async (req, res) => {
     console.log('[HTTP_REQUEST] Requisição recebida: POST /upload-audio');
     const { childId, conversationId } = req.body;
@@ -537,7 +530,7 @@ wss.on('connection', ws => {
                                     const childWs = findChildWebSocket(targetChildId);
                                     if (childWs) {
                                         childWs.send(JSON.stringify({ type: 'STOP_AUDIO' }));
-                                        console.log(`[WSS_AUDIO_MSG] [Conexão ${ws.id}] Sinal STOP_AUDIO enviado para o filho ${targetChildId} (nenhum pai mais ouvindo via binário decodificado como texto).`);
+                                        console.log(`[WSS_AUDIO_MSG] [Conexão ${childWs.id}] Sinal STOP_AUDIO enviado para o filho ${targetChildId} (nenhum pai mais ouvindo via binário decodificado como texto).`);
                                     }
                                 }
                                 ws.send(JSON.stringify({ type: 'STATUS', message: `Você parou de ouvir ${targetChildId}` }));
@@ -620,7 +613,7 @@ wss.on('connection', ws => {
                     const childWs = findChildWebSocket(childId);
                     if (childWs) {
                         childWs.send(JSON.stringify({ type: 'STOP_AUDIO' }));
-                        console.log(`[WSS_AUDIO_CLOSE] [Conexão ${childWs.id}] Sinal STOP_AUDIO enviado para o filho ${childId} (nenhum pai mais ouvindo após desconexão).`);
+                        console.log(`[WSS_AUDIO_CLOSE] [Conexão ${childWs.id}] Sinal STOP_AUDIO enviado para o filho ${childId} (nenhum pai mais ouvindo).`);
                     }
                 }
             }
