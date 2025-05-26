@@ -3,7 +3,7 @@ const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const AWS = require('aws-sdk');
-const twilio = require('twilio');
+const twilio = require('twilio'); // Importado, mas não utilizado no código fornecido. Manter por compatibilidade.
 const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
@@ -26,6 +26,7 @@ const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
+const DYNAMODB_TABLE_CHILDREN = 'Children'; // Adicionando a tabela de filhos
 
 const wsClientsMap = new Map(); // Mapa para armazenar clientes WebSocket
 
@@ -81,17 +82,23 @@ app.post('/upload-audio', upload.single('audio'), async (req, res) => {
             message: messageData
         });
 
-        wsClientsMap.forEach((ws, clientId) => {
-            // Verifica se é um cliente pai e se está interessado nesta conversa ou no filho
-            if (clientId.startsWith('parent_')) { // Exemplo: Pai com ID 'parent_PAI123'
-                try {
-                    ws.send(messageToParents);
-                    console.log(`[WS] Notificação de nova mensagem de áudio enviada para cliente WS pai (ID: ${clientId}).`);
-                } catch (wsError) {
-                    console.error('[WS_ERROR] Erro ao enviar notificação WS para pai:', wsError);
-                }
+        // Este wsClientsMap não está sendo populado para clientes WebSocket do tipo 'parent_'.
+        // Se você pretende usar wsClientsMap para enviar notificações de localização para pais,
+        // você precisa garantir que os pais se registrem no wsClientsMap na conexão WebSocket.
+        // Por enquanto, apenas o wsClientsMap é declarado, mas não tem lógica de adição de pais.
+        // Se os pais se conectarem via /ws-commands e você quiser notificar, pode usar o wssCommands.clients.
+        // Ou, se os pais se conectam via /audio-stream e se identificam como pais, você pode retransmitir por lá.
+        // Removendo a iteração sobre wsClientsMap aqui para evitar confusão, já que ela não é populada no seu código atual para 'parent_'.
+        // Se precisar notificar pais via WebSocket, o wssCommands.clients (abaixo para localização) seria mais apropriado,
+        // ou adaptar a lógica de identificação de pais em wss.
+        wssCommands.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN && client.isParent) {
+                // Você pode adicionar uma lógica aqui para filtrar qual pai deve receber a mensagem de qual filho
+                client.send(messageToParents);
+                console.log(`[WSS_COMMANDS] Notificação de nova mensagem de áudio enviada para pai ${client.parentId} via /ws-commands.`);
             }
         });
+
 
         res.status(200).json({ message: 'Áudio enviado e salvo com sucesso.', url: s3UploadResult.Location });
     } catch (error) {
@@ -134,17 +141,11 @@ app.post('/message', async (req, res) => {
             message: messageData
         });
 
-        wsClientsMap.forEach((ws, clientId) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                // Supondo que você pode ter um ID para identificar pais no seu wsClientsMap
-                if (clientId.startsWith('parent_')) { // Exemplo: Pai com ID 'parent_PAI123'
-                    try {
-                        ws.send(messageToParents);
-                        console.log(`[WS] Notificação de nova mensagem de texto enviada para cliente WS pai (ID: ${clientId}).`);
-                    } catch (wsError) {
-                        console.error('[WS_ERROR] Erro ao enviar notificação WS para pai:', wsError);
-                    }
-                }
+        wssCommands.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN && client.isParent) {
+                // Você pode adicionar uma lógica aqui para filtrar qual pai deve receber a mensagem de qual filho
+                client.send(messageToParents);
+                console.log(`[WSS_COMMANDS] Notificação de nova mensagem de texto enviada para pai ${client.parentId} via /ws-commands.`);
             }
         });
 
@@ -255,19 +256,35 @@ app.post('/send-command', async (req, res) => {
     }
 });
 
-// --- ROTA GET /get-child-ids ---
+// --- ROTA GET /get-child-ids (para listar todos os filhos) ---
+app.get('/get-child-ids', async (req, res) => {
+    console.log('[HTTP_REQUEST] Requisição recebida: GET /get-child-ids (para listar todos os filhos)');
+    try {
+        const params = {
+            TableName: DYNAMODB_TABLE_CHILDREN, // Supondo que você tem uma tabela 'Children'
+        };
+        const data = await docClient.scan(params).promise(); // Usar scan para listar todos
+        console.log(`[DYNAMODB] Dados de todos os filhos recuperados com sucesso. Total: ${data.Items.length}`);
+        res.status(200).json(data.Items);
+    } catch (error) {
+        console.error('[DYNAMODB_ERROR] Erro ao obter dados de todos os filhos:', error);
+        res.status(500).send('Erro ao obter dados dos filhos.');
+    }
+});
+
+// --- ROTA GET /get-child-ids/:childId (para buscar um filho específico) ---
 app.get('/get-child-ids/:childId', async (req, res) => {
     console.log('[HTTP_REQUEST] Requisição recebida: GET /get-child-ids/:childId');
     const { childId } = req.params;
 
-    if (!childId) {
+    if (!childId) { // Esta verificação é redundante aqui devido ao ':childId' na rota, mas não prejudica.
         console.warn('[HTTP_ERROR] childId não fornecido na requisição GET /get-child-ids.');
         return res.status(400).send('childId é obrigatório.');
     }
 
     try {
         const params = {
-            TableName: 'Children', // Supondo que você tem uma tabela 'Children'
+            TableName: DYNAMODB_TABLE_CHILDREN, // Supondo que você tem uma tabela 'Children'
             Key: {
                 childId: childId
             }
@@ -294,7 +311,7 @@ const wss = new WebSocket.Server({ server, path: '/audio-stream' });
 const wssCommands = new WebSocket.Server({ server, path: '/ws-commands' });
 
 const parentListeningSockets = new Map(); // Mapa: childId -> WebSocket do pai que está ouvindo
-const activeChildWebSockets = new Map(); // Mapa: childId -> WebSocket do filho ativo
+const activeChildWebSockets = new Map(); // Mapa: childId -> WebSocket do filho ativo (usado por ambas as rotas WS)
 
 // --- FUNÇÃO AUXILIAR PARA WEBSOCKETS ---
 function findChildWebSocket(childId) {
@@ -794,37 +811,15 @@ app.post('/location', async (req, res) => {
             timestamp: timestamp
         });
 
-        // Este wsClientsMap não está sendo populado para clientes WebSocket do tipo 'parent_'.
-        // Se você pretende usar wsClientsMap para enviar notificações de localização para pais,
-        // você precisa garantir que os pais se registrem no wsClientsMap na conexão WebSocket.
-        // Por enquanto, apenas o wsClientsMap é declarado, mas não tem lógica de adição de pais.
-        // Se os pais se conectarem via /ws-commands e você quiser notificar, pode usar o wssCommands.clients.
-        // Ou, se os pais se conectam via /audio-stream e se identificam como pais, você pode retransmitir por lá.
-
-        // Por enquanto, apenas para demonstrar a intenção de notificação, se o wsClientsMap fosse populado:
-        wsClientsMap.forEach((ws, clientId) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (clientId.startsWith('parent_')) { // Exemplo: Pai com ID 'parent_PAI123'
-                    try {
-                        ws.send(messageToParents);
-                        console.log(`[WS] Localização enviada para cliente WS pai (ID: ${clientId}).`);
-                    } catch (wsError) {
-                        console.error('[WS_ERROR] Erro ao enviar mensagem WS para pai:', wsError);
-                    }
-                }
-            }
-        });
-
-        // Alternativa: Se o pai estiver conectado via wssCommands para receber comandos e atualizações
+        // Notificar pais conectados via rota /ws-commands
         wssCommands.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN && client.isParent && client.parentId) {
+            if (client.readyState === WebSocket.OPEN && client.isParent) {
                 // Você pode adicionar uma lógica aqui para filtrar qual pai deve receber a localização de qual filho
                 // Ou enviar para todos os pais conectados na rota de comandos
                 client.send(messageToParents);
                 console.log(`[WSS_COMMANDS] Localização de ${childId} enviada para pai ${client.parentId} via /ws-commands.`);
             }
         });
-
 
         res.status(200).send('Localização recebida e salva com sucesso.');
 
@@ -837,6 +832,9 @@ app.post('/location', async (req, res) => {
 // --- ERROS ---
 app.use((req, res) => {
     console.warn(`[HTTP_ERROR] Rota não encontrada: ${req.method} ${req.url}`); // Log
+    console.warn(`[HTTP_ERROR] Parâmetros da requisição:`, req.params); // Novo log
+    console.warn(`[HTTP_ERROR] Query da requisição:`, req.query); // Novo log
+    console.warn(`[HTTP_ERROR] Corpo da requisição:`, req.body); // Novo log
     res.status(404).send('Rota não encontrada');
 });
 app.use((err, req, res, next) => {
@@ -854,6 +852,7 @@ server.listen(PORT || 10000, '0.0.0.0', () => {
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
 	console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`);
+    console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`); // Novo log
     console.log(`Twilio Account SID configurado via env: ${process.env.TWILIO_ACCOUNT_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key SID configurada via env: ${process.env.TWILIO_API_KEY_SID ? 'Sim' : 'Não'}`);
     console.log(`Twilio API Key Secret configurada via env: ${process.env.TWILIO_API_KEY_SECRET ? 'Sim' : 'Não'}`);
