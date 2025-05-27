@@ -75,10 +75,12 @@ app.post('/register-child', async (req, res) => {
         }
     };
 
+    // CORREÇÃO: Adicionando 'contactOrGroup' que é a chave primária da tabela Conversations
     const conversationTableParams = {
         TableName: DYNAMODB_TABLE_CONVERSATIONS,
         Item: {
-            conversationId: childId, // Usamos o childId como ID da "conversa" inicial do filho
+            contactOrGroup: childId, // <-- CORRIGIDO: Usando childId como a chave primária esperada
+            conversationId: childId, // Mantendo conversationId para consistência com o ID da "conversa"
             childId: childId,
             childName: childName,
             // Inicialmente, não há mensagens, mas a entrada existe para ser listada pelo pai
@@ -207,7 +209,10 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         const updateParams = {
             TableName: DYNAMODB_TABLE_MESSAGES,
             Key: {
-                conversationId: childId, // Ou o ID da conversa real
+                // CORREÇÃO: Usar a chave primária correta da tabela Messages
+                // Assumindo que Messages usa conversationId e messageId como chave composta.
+                // Se for diferente, ajuste aqui.
+                conversationId: childId, // Ou o ID da conversa real (childId ou parentId)
                 messageId: messageId
             },
             UpdateExpression: 'SET mediaUrl = :url, mediaType = :type',
@@ -390,8 +395,11 @@ wssCommands.on('connection', ws => {
                     const now = new Date().toISOString();
 
                     const messageItem = {
-                        conversationId: receiverId, // A conversationId deve ser o ID do outro lado da conversa (ex: childId para um pai, ou parentId para um filho)
-                        messageId: messageId,
+                        // CORREÇÃO: A chave 'conversationId' aqui é a chave de partição da tabela Messages.
+                        // Assumindo que a conversa é entre o remetente e o receptor.
+                        // Se 'Messages' usa 'contactOrGroup' como PK, ajuste aqui também.
+                        conversationId: receiverId === ws.id ? senderId : receiverId, // ID do outro lado da conversa
+                        messageId: messageId, // Sort key para Messages
                         senderId: senderId,
                         receiverId: receiverId,
                         content: content,
@@ -409,12 +417,12 @@ wssCommands.on('connection', ws => {
                         console.log(`[DynamoDB] Mensagem ${messageId} de ${senderId} para ${receiverId} salva.`);
 
                         // Atualizar a última mensagem na tabela Conversations
-                        // Se conversationId for o childId, e a tabela Conversations também tem o childId como PK
-                        const conversationToUpdateId = messageItem.conversationId;
+                        // CORREÇÃO: Usar 'contactOrGroup' como a chave primária da tabela Conversations
+                        const conversationToUpdateKey = messageItem.conversationId; // O ID do outro lado da conversa
 
                         await docClient.update({
                             TableName: DYNAMODB_TABLE_CONVERSATIONS,
-                            Key: { 'conversationId': conversationToUpdateId },
+                            Key: { 'contactOrGroup': conversationToUpdateKey }, // <-- CORRIGIDO AQUI
                             UpdateExpression: 'SET lastMessageContent = :lmc, lastMessageTimestamp = :lmt',
                             ExpressionAttributeValues: {
                                 ':lmc': content,
@@ -422,7 +430,7 @@ wssCommands.on('connection', ws => {
                             },
                             ReturnValues: 'UPDATED_NEW'
                         }).promise();
-                        console.log(`[DynamoDB] Conversa ${conversationToUpdateId} atualizada com última mensagem.`);
+                        console.log(`[DynamoDB] Conversa ${conversationToUpdateKey} atualizada com última mensagem.`);
 
 
                         // Reencaminha a mensagem para o receptor se ele estiver online
