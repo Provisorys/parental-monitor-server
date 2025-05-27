@@ -198,37 +198,45 @@ wss.on('connection', ws => {
                     }
                 }
                 break;
-            case 'commandResponse':
-                if (parentId && childId && command && msgContent) {
+            case 'commandResponse': // Esta é a resposta do filho para um comando, incluindo getLocation
+                if (parentId && childId && command) { // 'msgContent' virá com os dados de localização se for 'getLocation'
                     console.log(`[WS] Resposta de comando '${command}' recebida do filho ${childId} para o pai ${parentId}.`);
-                    const parentWs = wsClientsMap.get(parentId);
+
+                    const parentWs = wsClientsMap.get(parentId); // Usa o mapa geral de clientes
                     if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                        parentWs.send(JSON.stringify({ type: 'commandResponse', childId, command, message: msgContent }));
-                        console.log(`[WS] Resposta de comando '${command}' do filho ${childId} para o pai ${parentId}: ${msgContent}`);
+                        parentWs.send(JSON.stringify(parsedMessage)); // Envia a mensagem completa de volta para o pai
+                        console.log(`[WS] Resposta de comando '${command}' repassada para o pai ${parentId}.`);
+
+                        // Se a resposta for de getLocation, salve a localização no DB
+                        if (command === 'getLocation' && latitude !== undefined && longitude !== undefined && timestamp) {
+                            try {
+                                await saveLocation(childId, latitude, longitude, timestamp, accuracy, speed);
+                                console.log(`[WS_LOCATION] Localização de ${childId} salva após comando do pai.`);
+                            } catch (error) {
+                                console.error('[WS_LOCATION_ERROR] Erro ao salvar localização recebida via commandResponse:', error);
+                            }
+                        }
+
                     } else {
                         console.warn(`[WS] WebSocket do pai ${parentId} não encontrado ou não está aberto para receber resposta de comando.`);
                     }
                 }
                 break;
-            case 'locationUpdate': // NOVO: Para o filho enviar localização via WebSocket
+
+            case 'locationUpdate': // Esta é para o filho enviar atualizações de forma autônoma/contínua
                 if (childId && latitude !== undefined && longitude !== undefined && timestamp) {
-                    console.log(`[WS_LOCATION] Localização recebida via WebSocket de ${childId}: Lat=${latitude}, Lon=${longitude}, TS=${timestamp}`);
+                    console.log(`[WS_LOCATION] Localização recebida via WebSocket (locationUpdate) de ${childId}: Lat=${latitude}, Lon=${longitude}, TS=${timestamp}`);
                     try {
                         await saveLocation(childId, latitude, longitude, timestamp, accuracy, speed);
-                        // Opcional: Notificar o pai que está esperando essa atualização
-                        // Isso exigiria um mecanismo para saber qual pai solicitou
-                        // Para simplificar, se o pai está ouvindo, você pode repassar.
-                        const parentWs = parentListeningSockets.get(childId); // Reutilizando parentListeningSockets para comando/resposta
-                        if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                            parentWs.send(JSON.stringify({ type: 'locationData', childId, latitude, longitude, timestamp, accuracy, speed }));
-                            console.log(`[WS_LOCATION] Localização repassada para o pai ouvindo ${childId}.`);
-                        }
+                        // Se você quiser que o pai que está visualizando receba essas atualizações contínuas:
+                        // Você precisaria de uma lógica de "assinatura" onde o pai informa ao servidor que quer "ouvir" updates desse childId.
+                        // Para este caso, a abordagem de 'commandResponse' para getLocation é mais direta.
                     } catch (error) {
-                        console.error('[WS_LOCATION_ERROR] Erro ao salvar ou repassar localização via WebSocket:', error);
+                        console.error('[WS_LOCATION_ERROR] Erro ao salvar localização via WebSocket (locationUpdate):', error);
                         ws.send(JSON.stringify({ type: 'error', message: 'Falha ao processar localização.' }));
                     }
                 } else {
-                    console.warn(`[WS_LOCATION_ERROR] Dados de localização incompletos via WebSocket de ${childId}:`, parsedMessage);
+                    console.warn(`[WS_LOCATION_ERROR] Dados de localização incompletos via WebSocket (locationUpdate) de ${childId}:`, parsedMessage);
                     ws.send(JSON.stringify({ type: 'error', message: 'Dados de localização incompletos.' }));
                 }
                 break;
@@ -252,7 +260,7 @@ wss.on('connection', ws => {
             if (value === ws) {
                 activeChildWebSockets.delete(childId);
                 // Se o filho desconecta, o pai não pode mais ouvir áudio ou comando
-                parentListeningSockets.delete(childId); 
+                parentListeningSockets.delete(childId);
                 console.log(`[WS] Filho ${childId} removido do activeChildWebSockets.`);
                 break;
             }
@@ -406,9 +414,6 @@ app.post('/save-location', async (req, res) => {
 
     try {
         await saveLocation(childId, latitude, longitude, timestamp, accuracy, speed);
-        // Opcional: Notificar o pai via WebSocket sobre a nova localização se ele estiver ouvindo
-        // Isso exigiria uma forma de mapear childId para parentId E se o pai está "ativo" para esse filho
-        // Por agora, apenas salva no DB e envia uma confirmação HTTP.
         res.status(200).send('Localização GPS salva com sucesso.');
     } catch (error) {
         console.error('[HTTP_GPS_ERROR] Erro ao salvar localização GPS no DynamoDB (POST /save-location):', error);
@@ -446,8 +451,13 @@ app.get('/get-location-history/:childId', async (req, res) => {
 
     try {
         const data = await docClient.query(params).promise();
-        console.log(`[HTTP_GPS_REQUEST] Histórico de localização para ${childId} encontrado. Itens: ${data.Items.length}`);
-        res.json(data.Items);
+        if (data.Items && data.Items.length > 0) {
+            console.log(`[HTTP_GPS_REQUEST] Histórico de localização para ${childId} encontrado. Itens: ${data.Items.length}`);
+            res.json(data.Items);
+        } else {
+            console.warn(`[HTTP_GPS_REQUEST] Nenhuma localização encontrada no histórico para o filho ${childId}.`);
+            res.status(404).send('Nenhuma localização encontrada no histórico para o filho.');
+        }
     } catch (error) {
         console.error('[DynamoDB ERROR] Erro ao obter histórico de localização (GET /get-location-history):', error);
         res.status(500).send('Erro interno do servidor ao obter histórico de localização.');
