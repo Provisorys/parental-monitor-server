@@ -53,145 +53,8 @@ const server = http.createServer(app);
 // Crie o servidor WebSocket, anexando-o ao servidor HTTP
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', ws => {
-    console.log('Novo cliente WebSocket conectado.');
+// --- FUNÇÕES AUXILIARES (Definidas antes de serem usadas no WebSocket) ---
 
-    ws.on('message', message => {
-        let parsedMessage;
-        try {
-            parsedMessage = JSON.parse(message);
-        } catch (e) {
-            console.error('Falha ao parsear mensagem WebSocket:', e);
-            ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido.' }));
-            return;
-        }
-
-        const { type, childId, parentId, message: msgContent, audioData, command } = parsedMessage;
-
-        switch (type) {
-            case 'registerParent':
-                if (parentId) {
-                    console.log(`Pai registrado: ${parentId}`);
-                    wsClientsMap.set(parentId, ws);
-                    // Não é necessário activeChildWebSockets para pais
-                }
-                break;
-            case 'registerChild':
-                if (childId) {
-                    console.log(`Filho registrado: ${childId}`);
-                    wsClientsMap.set(childId, ws);
-                    activeChildWebSockets.set(childId, ws);
-                }
-                break;
-            case 'chatMessage':
-                if (childId && parentId && msgContent) {
-                    const recipientWs = wsClientsMap.get(parentId === ws.id ? childId : parentId); // Envia para o outro lado da conversa
-                    if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
-                        recipientWs.send(JSON.stringify({ type: 'chatMessage', childId, parentId, message: msgContent }));
-                    } else {
-                        console.warn(`WebSocket para ${parentId === ws.id ? 'filho' : 'pai'} não encontrado ou não está aberto.`);
-                    }
-                    // Salvar no DynamoDB
-                    saveMessage(childId, parentId, msgContent, 'chat');
-                }
-                break;
-            case 'audioStreamRequest':
-                if (childId && parentId) {
-                    // Armazena o WebSocket do pai para enviar o stream de áudio
-                    parentListeningSockets.set(childId, ws);
-                    console.log(`Pai ${parentId} solicitou stream de áudio para filho ${childId}.`);
-                    // Envie um comando ao filho para iniciar o stream
-                    const childWs = activeChildWebSockets.get(childId);
-                    if (childWs && childWs.readyState === WebSocket.OPEN) {
-                        childWs.send(JSON.stringify({ type: 'startAudioStream' }));
-                        console.log(`Comando 'startAudioStream' enviado para filho ${childId}.`);
-                    } else {
-                        console.warn(`WebSocket do filho ${childId} não encontrado ou não está aberto para iniciar stream de áudio.`);
-                        ws.send(JSON.stringify({ type: 'error', message: 'Filho offline para streaming de áudio.' }));
-                    }
-                }
-                break;
-            case 'audioStreamData':
-                if (childId && audioData) {
-                    const parentWs = parentListeningSockets.get(childId);
-                    if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                        parentWs.send(JSON.stringify({ type: 'audioStreamData', childId, audioData }));
-                    } else {
-                        console.warn(`WebSocket do pai para filho ${childId} não encontrado ou não está aberto para stream de áudio.`);
-                        // Se o pai desconectou, instrua o filho a parar de enviar áudio
-                        const childWs = activeChildWebSockets.get(childId);
-                        if (childWs && childWs.readyState === WebSocket.OPEN) {
-                            childWs.send(JSON.stringify({ type: 'stopAudioStream' }));
-                            console.log(`Comando 'stopAudioStream' enviado para filho ${childId} (pai desconectado).`);
-                            parentListeningSockets.delete(childId); // Limpa o mapa
-                        }
-                    }
-                }
-                break;
-            case 'stopAudioStream':
-                if (childId) {
-                    parentListeningSockets.delete(childId);
-                    console.log(`Stream de áudio para filho ${childId} parado.`);
-                    // Opcional: Notificar o filho para parar de enviar (se a parada veio do pai)
-                    const childWs = activeChildWebSockets.get(childId);
-                    if (childWs && childWs.readyState === WebSocket.OPEN) {
-                        childWs.send(JSON.stringify({ type: 'stopAudioStreamAck' }));
-                    }
-                }
-                break;
-            case 'sendCommand':
-                if (childId && command) {
-                    const childWs = activeChildWebSockets.get(childId);
-                    if (childWs && childWs.readyState === WebSocket.OPEN) {
-                        childWs.send(JSON.stringify({ type: 'command', command }));
-                        console.log(`Comando '${command}' enviado para filho ${childId}.`);
-                    } else {
-                        console.warn(`WebSocket do filho ${childId} não encontrado ou não está aberto para o comando.`);
-                        ws.send(JSON.stringify({ type: 'error', message: 'Filho offline para comandos.' }));
-                    }
-                }
-                break;
-            case 'commandResponse':
-                if (parentId && childId && command && msgContent) {
-                    const parentWs = wsClientsMap.get(parentId);
-                    if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                        parentWs.send(JSON.stringify({ type: 'commandResponse', childId, command, message: msgContent }));
-                        console.log(`Resposta de comando '${command}' do filho ${childId} para o pai ${parentId}: ${msgContent}`);
-                    }
-                }
-                break;
-            default:
-                console.warn('Tipo de mensagem WebSocket desconhecido:', type);
-                ws.send(JSON.stringify({ type: 'error', message: 'Tipo de mensagem desconhecido.' }));
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('Cliente WebSocket desconectado.');
-        // Remove o cliente desconectado dos mapas
-        for (let [key, value] of wsClientsMap.entries()) {
-            if (value === ws) {
-                wsClientsMap.delete(key);
-                console.log(`Cliente ${key} removido do wsClientsMap.`);
-                break;
-            }
-        }
-        for (let [childId, value] of activeChildWebSockets.entries()) {
-            if (value === ws) {
-                activeChildWebSockets.delete(childId);
-                parentListeningSockets.delete(childId); // Se o filho desconecta, o pai não pode mais ouvir
-                console.log(`Filho ${childId} removido do activeChildWebSockets.`);
-                break;
-            }
-        }
-    });
-
-    ws.on('error', error => {
-        console.error('Erro no WebSocket:', error);
-    });
-});
-
-// --- FUNÇÕES AUXILIARES ---
 async function saveMessage(childId, parentId, message, messageType) {
     const timestamp = new Date().toISOString();
     const params = {
@@ -208,18 +71,206 @@ async function saveMessage(childId, parentId, message, messageType) {
 
     try {
         await docClient.put(params).promise();
-        console.log('Mensagem salva no DynamoDB:', params.Item);
+        console.log('[DynamoDB] Mensagem salva no DynamoDB:', params.Item);
     } catch (error) {
-        console.error('Erro ao salvar mensagem no DynamoDB:', error);
+        console.error('[DynamoDB ERROR] Erro ao salvar mensagem no DynamoDB:', error);
     }
 }
+
+async function saveLocation(childId, latitude, longitude, timestamp, accuracy, speed) {
+    const params = {
+        TableName: DYNAMODB_TABLE_LOCATIONS,
+        Item: {
+            childId: childId, // Chave de partição
+            timestamp: timestamp, // Chave de ordenação
+            latitude: parseFloat(latitude),
+            longitude: parseFloat(longitude),
+            accuracy: accuracy ? parseFloat(accuracy) : null,
+            speed: speed ? parseFloat(speed) : null,
+        }
+    };
+
+    try {
+        await docClient.put(params).promise();
+        console.log('[DynamoDB] Localização GPS salva para:', childId, 'Lat:', latitude, 'Lon:', longitude);
+    } catch (error) {
+        console.error('[DynamoDB ERROR] Erro ao salvar localização GPS no DynamoDB:', error);
+        throw error; // Propagar o erro para quem chamou
+    }
+}
+
+
+wss.on('connection', ws => {
+    console.log('Novo cliente WebSocket conectado.');
+
+    ws.on('message', async message => { // Adicionado 'async' aqui para usar 'await' dentro
+        let parsedMessage;
+        try {
+            parsedMessage = JSON.parse(message);
+        } catch (e) {
+            console.error('Falha ao parsear mensagem WebSocket:', e);
+            ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido.' }));
+            return;
+        }
+
+        const { type, childId, parentId, message: msgContent, audioData, command, latitude, longitude, timestamp, accuracy, speed } = parsedMessage;
+
+        switch (type) {
+            case 'registerParent':
+                if (parentId) {
+                    console.log(`[WS] Pai registrado: ${parentId}`);
+                    wsClientsMap.set(parentId, ws);
+                }
+                break;
+            case 'registerChild':
+                if (childId) {
+                    console.log(`[WS] Filho registrado: ${childId}`);
+                    wsClientsMap.set(childId, ws);
+                    activeChildWebSockets.set(childId, ws);
+                }
+                break;
+            case 'chatMessage':
+                if (childId && parentId && msgContent) {
+                    const recipientWs = wsClientsMap.get(parentId === ws.id ? childId : parentId); // Envia para o outro lado da conversa
+                    if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+                        recipientWs.send(JSON.stringify({ type: 'chatMessage', childId, parentId, message: msgContent }));
+                    } else {
+                        console.warn(`[WS] WebSocket para ${parentId === ws.id ? 'filho' : 'pai'} não encontrado ou não está aberto.`);
+                    }
+                    // Salvar no DynamoDB
+                    saveMessage(childId, parentId, msgContent, 'chat');
+                }
+                break;
+            case 'audioStreamRequest':
+                if (childId && parentId) {
+                    // Armazena o WebSocket do pai para enviar o stream de áudio
+                    parentListeningSockets.set(childId, ws);
+                    console.log(`[WS] Pai ${parentId} solicitou stream de áudio para filho ${childId}.`);
+                    // Envie um comando ao filho para iniciar o stream
+                    const childWs = activeChildWebSockets.get(childId);
+                    if (childWs && childWs.readyState === WebSocket.OPEN) {
+                        childWs.send(JSON.stringify({ type: 'startAudioStream' }));
+                        console.log(`[WS] Comando 'startAudioStream' enviado para filho ${childId}.`);
+                    } else {
+                        console.warn(`[WS] WebSocket do filho ${childId} não encontrado ou não está aberto para iniciar stream de áudio.`);
+                        ws.send(JSON.stringify({ type: 'error', message: 'Filho offline para streaming de áudio.' }));
+                    }
+                }
+                break;
+            case 'audioStreamData':
+                if (childId && audioData) {
+                    const parentWs = parentListeningSockets.get(childId);
+                    if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+                        parentWs.send(JSON.stringify({ type: 'audioStreamData', childId, audioData }));
+                    } else {
+                        console.warn(`[WS] WebSocket do pai para filho ${childId} não encontrado ou não está aberto para stream de áudio.`);
+                        // Se o pai desconectou, instrua o filho a parar de enviar áudio
+                        const childWs = activeChildWebSockets.get(childId);
+                        if (childWs && childWs.readyState === WebSocket.OPEN) {
+                            childWs.send(JSON.stringify({ type: 'stopAudioStream' }));
+                            console.log(`[WS] Comando 'stopAudioStream' enviado para filho ${childId} (pai desconectado).`);
+                            parentListeningSockets.delete(childId); // Limpa o mapa
+                        }
+                    }
+                }
+                break;
+            case 'stopAudioStream':
+                if (childId) {
+                    parentListeningSockets.delete(childId);
+                    console.log(`[WS] Stream de áudio para filho ${childId} parado.`);
+                    // Opcional: Notificar o filho para parar de enviar (se a parada veio do pai)
+                    const childWs = activeChildWebSockets.get(childId);
+                    if (childWs && childWs.readyState === WebSocket.OPEN) {
+                        childWs.send(JSON.stringify({ type: 'stopAudioStreamAck' }));
+                    }
+                }
+                break;
+            case 'sendCommand':
+                if (childId && command) {
+                    console.log(`[WS] Comando '${command}' recebido para filho ${childId}.`);
+                    const childWs = activeChildWebSockets.get(childId);
+                    if (childWs && childWs.readyState === WebSocket.OPEN) {
+                        childWs.send(JSON.stringify({ type: 'command', command }));
+                        console.log(`[WS] Comando '${command}' enviado para filho ${childId}.`);
+                    } else {
+                        console.warn(`[WS] WebSocket do filho ${childId} não encontrado ou não está aberto para o comando '${command}'.`);
+                        ws.send(JSON.stringify({ type: 'error', message: 'Filho offline para comandos.' }));
+                    }
+                }
+                break;
+            case 'commandResponse':
+                if (parentId && childId && command && msgContent) {
+                    console.log(`[WS] Resposta de comando '${command}' recebida do filho ${childId} para o pai ${parentId}.`);
+                    const parentWs = wsClientsMap.get(parentId);
+                    if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+                        parentWs.send(JSON.stringify({ type: 'commandResponse', childId, command, message: msgContent }));
+                        console.log(`[WS] Resposta de comando '${command}' do filho ${childId} para o pai ${parentId}: ${msgContent}`);
+                    } else {
+                        console.warn(`[WS] WebSocket do pai ${parentId} não encontrado ou não está aberto para receber resposta de comando.`);
+                    }
+                }
+                break;
+            case 'locationUpdate': // NOVO: Para o filho enviar localização via WebSocket
+                if (childId && latitude !== undefined && longitude !== undefined && timestamp) {
+                    console.log(`[WS_LOCATION] Localização recebida via WebSocket de ${childId}: Lat=${latitude}, Lon=${longitude}, TS=${timestamp}`);
+                    try {
+                        await saveLocation(childId, latitude, longitude, timestamp, accuracy, speed);
+                        // Opcional: Notificar o pai que está esperando essa atualização
+                        // Isso exigiria um mecanismo para saber qual pai solicitou
+                        // Para simplificar, se o pai está ouvindo, você pode repassar.
+                        const parentWs = parentListeningSockets.get(childId); // Reutilizando parentListeningSockets para comando/resposta
+                        if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+                            parentWs.send(JSON.stringify({ type: 'locationData', childId, latitude, longitude, timestamp, accuracy, speed }));
+                            console.log(`[WS_LOCATION] Localização repassada para o pai ouvindo ${childId}.`);
+                        }
+                    } catch (error) {
+                        console.error('[WS_LOCATION_ERROR] Erro ao salvar ou repassar localização via WebSocket:', error);
+                        ws.send(JSON.stringify({ type: 'error', message: 'Falha ao processar localização.' }));
+                    }
+                } else {
+                    console.warn(`[WS_LOCATION_ERROR] Dados de localização incompletos via WebSocket de ${childId}:`, parsedMessage);
+                    ws.send(JSON.stringify({ type: 'error', message: 'Dados de localização incompletos.' }));
+                }
+                break;
+            default:
+                console.warn('[WS] Tipo de mensagem WebSocket desconhecido:', type);
+                ws.send(JSON.stringify({ type: 'error', message: 'Tipo de mensagem desconhecido.' }));
+        }
+    });
+
+    ws.on('close', () => {
+        console.log('Cliente WebSocket desconectado.');
+        // Remove o cliente desconectado dos mapas
+        for (let [key, value] of wsClientsMap.entries()) {
+            if (value === ws) {
+                wsClientsMap.delete(key);
+                console.log(`[WS] Cliente ${key} removido do wsClientsMap.`);
+                break;
+            }
+        }
+        for (let [childId, value] of activeChildWebSockets.entries()) {
+            if (value === ws) {
+                activeChildWebSockets.delete(childId);
+                // Se o filho desconecta, o pai não pode mais ouvir áudio ou comando
+                parentListeningSockets.delete(childId); 
+                console.log(`[WS] Filho ${childId} removido do activeChildWebSockets.`);
+                break;
+            }
+        }
+    });
+
+    ws.on('error', error => {
+        console.error('[WS ERROR] Erro no WebSocket:', error);
+    });
+});
+
 
 // --- ROTAS HTTP ---
 
 // Rota para receber mensagens do app do filho (SMS)
 app.post('/sms-webhook', async (req, res) => {
     const { From, Body } = req.body;
-    console.log(`SMS recebido de ${From}: ${Body}`);
+    console.log(`[HTTP] SMS recebido de ${From}: ${Body}`);
 
     // Aqui você precisaria de uma lógica para associar o número de telefone
     // (From) a um childId ou parentId para rotear a mensagem.
@@ -243,6 +294,7 @@ app.post('/send-sms', async (req, res) => {
     const { to, message } = req.body;
 
     if (!to || !message) {
+        console.warn('[HTTP_ERROR] Tentativa de enviar SMS com dados incompletos.');
         return res.status(400).send('Para enviar SMS, ' +
             'os campos "to" (número do destinatário) e "message" (mensagem) são obrigatórios.');
     }
@@ -253,10 +305,10 @@ app.post('/send-sms', async (req, res) => {
             to: to,
             from: TWILIO_PHONE_NUMBER
         });
-        console.log('SMS enviado com sucesso:', twilioMessage.sid);
+        console.log('[HTTP] SMS enviado com sucesso:', twilioMessage.sid);
         res.status(200).send('SMS enviado com sucesso.');
     } catch (error) {
-        console.error('Erro ao enviar SMS:', error);
+        console.error('[HTTP_ERROR] Erro ao enviar SMS:', error);
         res.status(500).send('Erro ao enviar SMS.');
     }
 });
@@ -264,6 +316,7 @@ app.post('/send-sms', async (req, res) => {
 // Rota para fazer upload de arquivos para o S3
 app.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file) {
+        console.warn('[HTTP_ERROR] Tentativa de upload sem arquivo.');
         return res.status(400).send('Nenhum arquivo enviado.');
     }
 
@@ -271,6 +324,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     const { childId, parentId, messageType } = req.body; // Adicione messageType para saber o que é (imagem, áudio, vídeo)
 
     if (!childId || !parentId || !messageType) {
+        console.warn('[HTTP_ERROR] Dados de upload incompletos: childId, parentId ou messageType ausentes.');
         return res.status(400).send('childId, parentId e messageType são obrigatórios para upload.');
     }
 
@@ -286,7 +340,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     try {
         const s3Data = await s3.upload(params).promise();
-        console.log('Arquivo enviado para S3:', s3Data.Location);
+        console.log('[S3] Arquivo enviado para S3:', s3Data.Location);
 
         // Salvar a URL do arquivo no DynamoDB
         await saveMessage(childId, parentId, s3Data.Location, messageType);
@@ -305,7 +359,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
         res.status(200).json({ message: 'Arquivo enviado com sucesso!', url: s3Data.Location });
     } catch (error) {
-        console.error('Erro ao enviar arquivo para S3:', error);
+        console.error('[S3_ERROR] Erro ao enviar arquivo para S3:', error);
         res.status(500).send('Erro ao enviar arquivo.');
     }
 });
@@ -322,15 +376,15 @@ app.get('/get-child-ids', async (req, res) => {
     };
 
     try {
-        console.log('Iniciando scan na tabela Conversations para obter todos os child IDs...');
+        console.log('[HTTP] Iniciando scan na tabela Conversations para obter todos os child IDs...');
         const data = await docClient.scan(params).promise();
-        console.log(`Scan concluído. Itens encontrados: ${data.Items.length}`);
+        console.log(`[HTTP] Scan concluído. Itens encontrados: ${data.Items.length}`);
 
         // Extrai todos os childId dos itens retornados e remove duplicados (se existirem)
         // e valores nulos/indefinidos
         const childIds = [...new Set(data.Items.map(item => item.childId).filter(Boolean))];
 
-        console.log('Child IDs encontrados:', childIds);
+        console.log('[HTTP] Child IDs encontrados:', childIds);
         res.json(childIds);
     } catch (error) {
         console.error('[DynamoDB ERROR] Erro ao buscar todos os child IDs:', error);
@@ -343,34 +397,21 @@ app.get('/get-child-ids', async (req, res) => {
 app.post('/save-location', async (req, res) => {
     const { childId, latitude, longitude, timestamp, accuracy, speed } = req.body;
 
-    if (!childId || !latitude || !longitude || !timestamp) {
+    console.log(`[HTTP_GPS_RECEIVE] Recebendo localização para ${childId}: Lat=${latitude}, Lon=${longitude}, TS=${timestamp}`); // <<< ADICIONE ESTE LOG
+
+    if (!childId || latitude === undefined || longitude === undefined || !timestamp) {
+        console.error('[HTTP_GPS_ERROR] Dados de localização incompletos na requisição POST /save-location:', req.body); // <<< ADICIONE ESTE LOG
         return res.status(400).send('childId, latitude, longitude e timestamp são obrigatórios.');
     }
 
-    const params = {
-        TableName: DYNAMODB_TABLE_LOCATIONS,
-        Item: {
-            childId: childId, // Chave de partição
-            timestamp: timestamp, // Chave de ordenação
-            latitude: parseFloat(latitude),
-            longitude: parseFloat(longitude),
-            accuracy: accuracy ? parseFloat(accuracy) : null,
-            speed: speed ? parseFloat(speed) : null,
-            // Adicione outros atributos se seu app de GPS envia
-        }
-    };
-
     try {
-        await docClient.put(params).promise();
-        console.log('Localização GPS salva para:', childId, params.Item);
-
-        // Opcional: Notificar o pai via WebSocket sobre a nova localização
-        // Isso exigiria uma forma de mapear childId para parentId
-        // Por agora, apenas salva no DB.
-
+        await saveLocation(childId, latitude, longitude, timestamp, accuracy, speed);
+        // Opcional: Notificar o pai via WebSocket sobre a nova localização se ele estiver ouvindo
+        // Isso exigiria uma forma de mapear childId para parentId E se o pai está "ativo" para esse filho
+        // Por agora, apenas salva no DB e envia uma confirmação HTTP.
         res.status(200).send('Localização GPS salva com sucesso.');
     } catch (error) {
-        console.error('Erro ao salvar localização GPS no DynamoDB:', error);
+        console.error('[HTTP_GPS_ERROR] Erro ao salvar localização GPS no DynamoDB (POST /save-location):', error);
         res.status(500).send('Erro interno do servidor ao salvar localização GPS.');
     }
 });
@@ -380,7 +421,10 @@ app.get('/get-location-history/:childId', async (req, res) => {
     const { childId } = req.params;
     const { limit, startTimestamp } = req.query; // Opcional: limite de resultados e timestamp inicial
 
+    console.log(`[HTTP_GPS_REQUEST] Pai solicitou histórico de localização para ${childId}.`); // <<< ADICIONE ESTE LOG
+
     if (!childId) {
+        console.warn('[HTTP_GPS_ERROR] childId ausente na requisição GET /get-location-history.');
         return res.status(400).send('O parâmetro childId é obrigatório.');
     }
 
@@ -402,9 +446,10 @@ app.get('/get-location-history/:childId', async (req, res) => {
 
     try {
         const data = await docClient.query(params).promise();
+        console.log(`[HTTP_GPS_REQUEST] Histórico de localização para ${childId} encontrado. Itens: ${data.Items.length}`);
         res.json(data.Items);
     } catch (error) {
-        console.error('Erro ao obter histórico de localização:', error);
+        console.error('[DynamoDB ERROR] Erro ao obter histórico de localização (GET /get-location-history):', error);
         res.status(500).send('Erro interno do servidor ao obter histórico de localização.');
     }
 });
@@ -413,7 +458,10 @@ app.get('/get-location-history/:childId', async (req, res) => {
 app.get('/get-last-location/:childId', async (req, res) => {
     const { childId } = req.params;
 
+    console.log(`[HTTP_GPS_REQUEST] Pai solicitou a última localização para ${childId}.`); // <<< ADICIONE ESTE LOG
+
     if (!childId) {
+        console.warn('[HTTP_GPS_ERROR] childId ausente na requisição GET /get-last-location.');
         return res.status(400).send('O parâmetro childId é obrigatório.');
     }
 
@@ -430,12 +478,14 @@ app.get('/get-last-location/:childId', async (req, res) => {
     try {
         const data = await docClient.query(params).promise();
         if (data.Items && data.Items.length > 0) {
+            console.log(`[HTTP_GPS_REQUEST] Última localização para ${childId} encontrada:`, data.Items[0]);
             res.json(data.Items[0]);
         } else {
+            console.warn(`[HTTP_GPS_REQUEST] Nenhuma localização encontrada para o filho ${childId}.`);
             res.status(404).send('Nenhuma localização encontrada para o filho.');
         }
     } catch (error) {
-        console.error('Erro ao obter última localização:', error);
+        console.error('[DynamoDB ERROR] Erro ao obter última localização (GET /get-last-location):', error);
         res.status(500).send('Erro interno do servidor ao obter última localização.');
     }
 });
