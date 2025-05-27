@@ -28,6 +28,7 @@ const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Tabela para dados de localização
 const DYNAMODB_TABLE_CHILDREN = 'Children'; // Nova tabela para registrar metadados dos filhos
+const DYNAMODB_TABLE_NOTIFICATION_TOKENS = 'NotificationTokens'; // Nova tabela para tokens de notificação
 
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; // Nome do bucket S3 para mídias
 
@@ -101,24 +102,24 @@ app.post('/register-child', async (req, res) => {
 });
 
 // Nova rota para o app "Pai" buscar a lista de filhos registrados
+// Esta rota corresponde ao GET /get-child-ids que estava dando erro.
 app.get('/get-registered-children', async (req, res) => {
+    console.log('[HTTP] Recebida requisição GET /get-registered-children');
     // Você pode querer filtrar por parentId aqui se a autenticação do pai for implementada
-    // const { parentId } = req.query;
+    // const { parentId } = req.query; 
 
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN, // Busca da tabela Children
-        // Se quiser buscar da Conversations para listar, também é possível
-        // TableName: DYNAMODB_TABLE_CONVERSATIONS,
-        // ProjectionExpression: "childId, childName, parentId" // Especificar campos se não forem todos necessários
+        ProjectionExpression: "childId, childName, parentId" // Especificar campos para otimizar
     };
 
     try {
         const result = await docClient.scan(params).promise(); // Scan para buscar todos os filhos
-        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela '${DYNAMODB_TABLE_CHILDREN}'.`);
+        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela '${DYNAMODB_TABLE_CHILDREN}'. Encontrados ${result.Items.length} filhos.`);
         res.status(200).json(result.Items.map(item => ({
             childId: item.childId,
             childName: item.childName,
-            parentId: item.parentId // Incluir parentId se relevante
+            parentId: item.parentId 
         })));
     } catch (error) {
         console.error('[DynamoDB] Erro ao buscar lista de filhos:', error);
@@ -153,13 +154,11 @@ app.post('/location', async (req, res) => {
 
         // Envia a atualização de localização para clientes WebSocket ouvindo para este childId
         wsClientsMap.forEach((ws, id) => {
-            if (id === childId || (ws.type === 'parent' && ws.listeningToChildId === childId)) {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'locationUpdate',
-                        data: { childId, latitude, longitude, timestamp }
-                    }));
-                }
+            if (ws.type === 'parent' && ws.listeningToChildId === childId && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'locationUpdate',
+                    data: { childId, latitude, longitude, timestamp }
+                }));
             }
         });
 
@@ -221,12 +220,44 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     }
 });
 
+// Nova rota para registrar/atualizar tokens de notificação (ex: FCM tokens)
+// Esta rota resolve o erro "Rota não encontrada: POST /notifications" que apareceu nos logs
+app.post('/notifications/register-token', async (req, res) => {
+    const { userId, token, platform } = req.body; // userId pode ser parentId ou childId
+    console.log(`[HTTP] Recebida requisição POST /notifications/register-token para userId: ${userId}, platform: ${platform}`);
+
+    if (!userId || !token || !platform) {
+        return res.status(400).send('userId, token e platform são obrigatórios.');
+    }
+
+    const params = {
+        TableName: DYNAMODB_TABLE_NOTIFICATION_TOKENS,
+        Item: {
+            userId: userId, // Pode ser parentId ou childId
+            token: token,
+            platform: platform, // Ex: 'android', 'ios'
+            timestamp: Date.now()
+        }
+    };
+
+    try {
+        await docClient.put(params).promise();
+        console.log(`[DynamoDB] Token de notificação registrado/atualizado com sucesso para ${userId} na tabela '${DYNAMODB_TABLE_NOTIFICATION_TOKENS}'.`);
+        res.status(200).send('Token de notificação registrado com sucesso.');
+    } catch (error) {
+        console.error('[DynamoDB] Erro ao registrar token de notificação:', error);
+        res.status(500).send('Erro interno do servidor ao registrar token de notificação.');
+    }
+});
+
 // Rota de Notificações (requisitada pelo Android, mas não implementada no seu código)
+// Mantida para compatibilidade, mas o registro de tokens deve ir para /notifications/register-token
 app.post('/notifications', (req, res) => {
-    console.warn('[HTTP] Rota /notifications foi chamada, mas não está implementada.');
-    // TODO: Implementar lógica para lidar com tokens FCM ou notificações push
-    // Geralmente envolve salvar o token do dispositivo e usá-lo para enviar notificações
-    res.status(200).json({ message: 'Rota de notificações recebida (sem implementação completa).' });
+    console.warn('[HTTP] Rota /notifications foi chamada. Por favor, use /notifications/register-token para registrar tokens.');
+    // TODO: Se esta rota tiver outra finalidade além de registrar tokens, implemente-a aqui.
+    // Exemplo: { "childId": "xyz", "message": "Olá, filho!" }
+    // Enviar notificação push usando o token salvo previamente.
+    res.status(200).json({ message: 'Rota de notificações recebida (sem implementação completa para envio).' });
 });
 
 
@@ -430,28 +461,47 @@ wssCommands.on('connection', ws => {
 wssAudio.on('connection', ws => {
     console.log('[WebSocket-Audio] Cliente de áudio conectado.');
     // Um cliente se conecta aqui, provavelmente um filho
-    // Você pode querer que o filho se identifique com childId também aqui
+    // Você precisa de um mecanismo para que o cliente de áudio se identifique
+    // Ex: O cliente envia a primeira mensagem como {type: "initAudio", childId: "xyz"}
+    let childIdForAudio = 'unknown_audio_client'; // Valor padrão, deve ser atualizado pelo cliente
+
     ws.on('message', message => {
-        // Recebe chunks de áudio de um filho
-        // E reencaminha para o pai que está ouvindo (se houver)
-        if (typeof message !== 'string') { // Verifica se é um Buffer (dados binários)
-            // Aqui, você precisaria identificar de qual filho é o áudio
-            // e para qual pai deve ser reencaminhado.
-            // Isso geralmente envolve uma mensagem 'init' separada no início da conexão de áudio.
-            // Por simplicidade, vamos assumir que o áudio pode ser transmitido para um pai 'ouvindo' um childId específico
-            // Você precisaria de um mecanismo para associar este WS de áudio a um childId.
-            // Por exemplo: o cliente envia {type: "initAudio", childId: "xyz"} primeiro
-            wsClientsMap.forEach((clientWs, id) => {
+        // Se a primeira mensagem for uma string de identificação (initAudio)
+        if (typeof message === 'string') {
+            try {
+                const parsedMessage = JSON.parse(message);
+                if (parsedMessage.type === 'initAudio' && parsedMessage.childId) {
+                    childIdForAudio = parsedMessage.childId;
+                    ws.childIdForAudio = childIdForAudio; // Armazena no objeto WS para referência futura
+                    console.log(`[WebSocket-Audio] Cliente de áudio identificado como filho: ${childIdForAudio}`);
+                    ws.send(JSON.stringify({ type: 'status', message: `Conectado para áudio como filho ${childIdForAudio}.` }));
+                } else {
+                    console.warn('[WebSocket-Audio] Mensagem inicial de áudio inesperada ou incompleta:', parsedMessage);
+                }
+            } catch (e) {
+                console.warn('[WebSocket-Audio] Mensagem de áudio não JSON ou mal formatada:', message.toString().substring(0, 50), '...'); // Logar parte da mensagem
+                // Se não for JSON, tratar como dados binários de áudio
+                if (typeof message !== 'string') {
+                     // Reencaminha o buffer de áudio para pais ouvindo este childId
+                    wssCommands.clients.forEach(clientWs => { // Percorre os clientes do wssCommands
+                        if (clientWs.type === 'parent' && clientWs.listeningToChildId === ws.childIdForAudio && clientWs.readyState === WebSocket.OPEN) {
+                            clientWs.send(message); // Reencaminha o buffer de áudio diretamente
+                        }
+                    });
+                }
+            }
+        } else { // Se não for string, é tratado como dados binários de áudio
+            // Reencaminha o buffer de áudio para pais ouvindo este childId
+            wssCommands.clients.forEach(clientWs => { // Percorre os clientes do wssCommands
                 if (clientWs.type === 'parent' && clientWs.listeningToChildId === ws.childIdForAudio && clientWs.readyState === WebSocket.OPEN) {
-                     clientWs.send(message); // Reencaminha o buffer de áudio diretamente
+                    clientWs.send(message); // Reencaminha o buffer de áudio diretamente
                 }
             });
         }
     });
 
     ws.on('close', () => {
-        // Limpar qualquer referência ao WebSocket de áudio
-        console.log('[WebSocket-Audio] Cliente de áudio desconectado.');
+        console.log(`[WebSocket-Audio] Cliente de áudio desconectado (Filho: ${ws.childIdForAudio || 'não identificado'}).`);
     });
 
     ws.on('error', error => {
@@ -485,5 +535,5 @@ server.listen(PORT, '0.0.0.0', () => { // AGORA USA 'server' AO INVÉS DE 'app'
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
     console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`);
     console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
-    // console.log(`Twilio Account SID: ${TWILIO_ACCOUNT_SID ? 'Configurado' : 'Não Configurado'}`); // REMOVIDO
+    console.log(`Constante DYNAMODB_TABLE_NOTIFICATION_TOKENS: ${DYNAMODB_TABLE_NOTIFICATION_TOKENS}`);
 });
