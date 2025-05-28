@@ -370,10 +370,12 @@ wssCommands.on('connection', ws => {
                 case 'requestLocation':
                     // Pai solicitando localização de um filho
                     if (parentId && data && data.targetChildId) {
+                        // NOVO LOG ESPECÍFICO PARA O COMANDO GETLOCATION (OU requestLocation)
+                        console.log(`[WebSocket-Commands] Ação: Pai ${parentId} solicitou localização do filho ${data.targetChildId}.`); // << ADICIONADO AQUI
                         const targetChildWs = wsClientsMap.get(data.targetChildId);
                         if (targetChildWs && targetChildWs.type === 'child' && targetChildWs.readyState === WebSocket.OPEN) {
                             targetChildWs.send(JSON.stringify({ type: 'requestLocation', senderId: parentId }));
-                            console.log(`[WebSocket-Commands] Requisição de localização de ${parentId} enviada para ${data.targetChildId}.`);
+                            console.log(`[WebSocket-Commands] Comando 'requestLocation' enviado para ${data.targetChildId}.`);
                         } else {
                             ws.send(JSON.stringify({ type: 'error', message: 'Filho offline ou não encontrado.', targetChildId: data.targetChildId }));
                             console.warn(`[WebSocket-Commands] Filho ${data.targetChildId} não encontrado para requisição de localização.`);
