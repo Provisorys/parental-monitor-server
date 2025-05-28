@@ -303,6 +303,7 @@ wssCommands.on('connection', ws => {
                     if (childSocket && childSocket.type === 'child' && childSocket.readyState === WebSocket.OPEN) {
                         childSocket.send(JSON.stringify({
                             type: 'getLocation',
+                            childId: requestedChildId, // Adicionei esta linha
                             requestedBy: requestingParentId
                         }));
                         console.log(`[WebSocket-Commands] Mensagem 'getLocation' enviada para o filho ${requestedChildId}.`);
