@@ -342,8 +342,7 @@ wssCommands.on('connection', ws => {
                         const params = {
                             TableName: DYNAMODB_TABLE_LOCATIONS, // Sua tabela GPSintegracao
                             Item: {
-                                locationId: uuidv4(),
-                                indi1: childId,
+                                locationId: uuidv4(),                                
 								childId: childId,
                                 parentId: parentId, // Incluir parentId aqui também
                                 latitude: latitude, // <--- ALTERADO AQUI
