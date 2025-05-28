@@ -41,7 +41,7 @@ app.get('/', (req, res) => {
 
 // --- Rota para Registrar um Filho via HTTP (Mantida, mas a prioridade é o WS) ---
 app.post('/register-child', async (req, res) => {
-    const { id, childName, parentId } = req.body;
+    const { id, childName, parentId } = req.body; // childName já vem do body
 
     if (!id || !childName || !parentId) {
         return res.status(400).send('ID do filho, nome e ID do pai são obrigatórios.');
@@ -51,7 +51,7 @@ app.post('/register-child', async (req, res) => {
         TableName: DYNAMODB_TABLE_CHILDREN,
         Item: {
             childId: id, // CORRIGIDO: Usando 'childId' como a chave primária
-            name: name,
+            childName: childName, // CORRIGIDO: Alterado 'name' para 'childName'
             parentId: parentId,
             registrationDate: new Date().toISOString(),
             connected: false // Assume que não está conectado via WS no momento do registro HTTP
@@ -60,7 +60,7 @@ app.post('/register-child', async (req, res) => {
 
     try {
         await docClient.put(params).promise();
-        console.log(`[DynamoDB] Filho registrado/atualizado via HTTP: ${name} (ID: ${id}) para o pai ${parentId}`);
+        console.log(`[DynamoDB] Filho registrado/atualizado via HTTP: ${childName} (ID: ${id}) para o pai ${parentId}`); // CORRIGIDO: Usando 'childName' no log
         res.status(200).send('Filho registrado com sucesso via HTTP.');
     } catch (error) {
         console.error('[DynamoDB_ERROR] Erro ao registrar filho via HTTP:', error);
@@ -210,14 +210,14 @@ wssCommands.on('connection', ws => {
             ws.id = childId;
             ws.type = 'child';
             addActiveConnection(childId, 'child', ws);
-            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, childNome: ${childName}`);
+            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, Nome: ${childName}`);
             ws.parentId = parentId;
 
             const params = {
                 TableName: DYNAMODB_TABLE_CHILDREN,
                 Item: {
                     childId: childId, // CORRIGIDO: Usando 'childId' como a chave primária
-                    name: childName,
+                    childName: childName, // CORRIGIDO: Alterado 'name' para 'childName'
                     parentId: parentId,
                     lastConnected: new Date().toISOString(),
                     connected: true
