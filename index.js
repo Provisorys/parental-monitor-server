@@ -300,7 +300,9 @@ wssCommands.on('connection', ws => {
     ws.on('message', async message => {
         try {
             const parsedMessage = JSON.parse(message);
-            const { type, childId, parentId, data } = parsedMessage; // Extrai 'data' também
+            // Removi 'data' da desestruturação aqui, pois agora latitude/longitude/timestamp
+            // são esperados diretamente na mensagem de nível superior para 'locationUpdate'.
+            const { type, childId, parentId } = parsedMessage; 
 
             switch (type) {
                 case 'childConnect': // Novo tipo de mensagem para o app filho se identificar
@@ -318,13 +320,14 @@ wssCommands.on('connection', ws => {
                     break;
 
                 case 'parentConnect': // Tipo de mensagem para o app pai se identificar
-                    if (parentId && data && data.listeningToChildId) {
+                    // Aqui 'data' ainda é esperado para 'listeningToChildId'
+                    if (parentId && parsedMessage.data && parsedMessage.data.listeningToChildId) {
                         wsClientsMap.set(parentId, ws); // Mapeia o pai
                         ws.id = parentId;
                         ws.type = 'parent';
-                        ws.listeningToChildId = data.listeningToChildId; // Pai está ouvindo um filho específico
-                        ws.send(JSON.stringify({ type: 'status', message: `Conectado como pai ${parentId}, ouvindo ${data.listeningToChildId}.` }));
-                        console.log(`[WebSocket-Commands] Pai conectado: ${parentId}, ouvindo filho: ${data.listeningToChildId}`);
+                        ws.listeningToChildId = parsedMessage.data.listeningToChildId; // Pai está ouvindo um filho específico
+                        ws.send(JSON.stringify({ type: 'status', message: `Conectado como pai ${parentId}, ouvindo ${parsedMessage.data.listeningToChildId}.` }));
+                        console.log(`[WebSocket-Commands] Pai conectado: ${parentId}, ouvindo filho: ${parsedMessage.data.listeningToChildId}`);
                     } else {
                         ws.send(JSON.stringify({ type: 'error', message: 'ID (parentId ou listeningToChildId) ausente na mensagem parentConnect.' }));
                         console.warn('[WebSocket-Commands] Cliente conectado sem ID válido na mensagem parentConnect.');
@@ -333,29 +336,33 @@ wssCommands.on('connection', ws => {
 
                 case 'locationUpdate':
                     // Recebe atualização de localização de um filho via WebSocket
-                    if (childId && parentId && data) {
+                    // Desestrutura diretamente da parsedMessage
+                    const { latitude, longitude, timestamp, accuracy, speed } = parsedMessage; // <--- ALTERADO AQUI
+                    if (childId && parentId && latitude != null && longitude != null && timestamp != null) { // Verificação mais robusta
                         const params = {
                             TableName: DYNAMODB_TABLE_LOCATIONS, // Sua tabela GPSintegracao
                             Item: {
                                 locationId: uuidv4(),
                                 childId: childId,
                                 parentId: parentId, // Incluir parentId aqui também
-                                latitude: data.latitude,
-                                longitude: data.longitude,
-                                timestamp: data.timestamp,
-                                accuracy: data.accuracy || null,
-                                speed: data.speed || null,
+                                latitude: latitude, // <--- ALTERADO AQUI
+                                longitude: longitude, // <--- ALTERADO AQUI
+                                timestamp: timestamp, // <--- ALTERADO AQUI
+                                accuracy: accuracy || null, // <--- Pegando diretamente também
+                                speed: speed || null, // <--- Pegando diretamente também
                                 createdAt: new Date().toISOString()
                             }
                         };
                         try {
                             await docClient.put(params).promise();
-                            console.log(`[WebSocket-Commands] Localização WS de ${childId} salva: Lat=${data.latitude}, Lng=${data.longitude}`);
+                            console.log(`[WebSocket-Commands] Localização WS de ${childId} salva: Lat=${latitude}, Lng=${longitude}`);
 
                             // Reencaminha a localização para o pai que está ouvindo este filho
                             wsClientsMap.forEach((clientWs, id) => {
                                 if (clientWs.type === 'parent' && clientWs.listeningToChildId === childId && clientWs.readyState === WebSocket.OPEN) {
-                                    clientWs.send(JSON.stringify({ type: 'locationUpdate', data: { childId, parentId, ...data } }));
+                                    // Reencaminha a mensagem original (ou um novo objeto com os dados corretos)
+                                    // Certifique-se que o 'data' encapsula as informações de localização para o pai
+                                    clientWs.send(JSON.stringify({ type: 'locationUpdate', data: { childId, parentId, latitude, longitude, timestamp, accuracy, speed } }));
                                     console.log(`[WebSocket-Commands] Localização de ${childId} encaminhada para o pai ${id}.`);
                                 }
                             });
@@ -363,22 +370,23 @@ wssCommands.on('connection', ws => {
                             console.error('[DynamoDB_ERROR] Erro ao salvar localização via WS:', err);
                         }
                     } else {
-                        console.warn('[WebSocket-Commands] Mensagem locationUpdate incompleta:', parsedMessage);
+                        console.warn('[WebSocket-Commands] Mensagem locationUpdate incompleta ou com dados inválidos:', parsedMessage); // Mensagem de log mais clara
                     }
                     break;
 
                 case 'requestLocation':
                     // Pai solicitando localização de um filho
-                    if (parentId && data && data.targetChildId) {
+                    // Aqui 'data' ainda é esperado
+                    if (parentId && parsedMessage.data && parsedMessage.data.targetChildId) {
                         // NOVO LOG ESPECÍFICO PARA O COMANDO GETLOCATION (OU requestLocation)
-                        console.log(`[WebSocket-Commands] Ação: Pai ${parentId} solicitou localização do filho ${data.targetChildId}.`); // << ADICIONADO AQUI
-                        const targetChildWs = wsClientsMap.get(data.targetChildId);
+                        console.log(`[WebSocket-Commands] Ação: Pai ${parentId} solicitou localização do filho ${parsedMessage.data.targetChildId}.`); // << ADICIONADO AQUI
+                        const targetChildWs = wsClientsMap.get(parsedMessage.data.targetChildId);
                         if (targetChildWs && targetChildWs.type === 'child' && targetChildWs.readyState === WebSocket.OPEN) {
                             targetChildWs.send(JSON.stringify({ type: 'requestLocation', senderId: parentId }));
-                            console.log(`[WebSocket-Commands] Comando 'requestLocation' enviado para ${data.targetChildId}.`);
+                            console.log(`[WebSocket-Commands] Comando 'requestLocation' enviado para ${parsedMessage.data.targetChildId}.`);
                         } else {
-                            ws.send(JSON.stringify({ type: 'error', message: 'Filho offline ou não encontrado.', targetChildId: data.targetChildId }));
-                            console.warn(`[WebSocket-Commands] Filho ${data.targetChildId} não encontrado para requisição de localização.`);
+                            ws.send(JSON.stringify({ type: 'error', message: 'Filho offline ou não encontrado.', targetChildId: parsedMessage.data.targetChildId }));
+                            console.warn(`[WebSocket-Commands] Filho ${parsedMessage.data.targetChildId} não encontrado para requisição de localização.`);
                         }
                     } else {
                         console.warn('[WebSocket-Commands] Mensagem requestLocation incompleta:', parsedMessage);
@@ -387,75 +395,81 @@ wssCommands.on('connection', ws => {
 
                 case 'chatMessage':
                     // Recebe mensagem de chat
-                    const { senderId, receiverId, content, mediaUrl, timestamp: msgTimestamp } = data;
-                    if (!senderId || !receiverId || !content) {
-                        console.warn('[WebSocket-Commands] Mensagem de chat incompleta:', parsedMessage);
-                        return;
-                    }
-
-                    const messageId = uuidv4();
-                    const now = new Date().toISOString();
-
-                    const messageItem = {
-                        // CORREÇÃO: A chave 'conversationId' aqui é a chave de partição da tabela Messages.
-                        // Assumindo que a conversa é entre o remetente e o receptor.
-                        // Se 'Messages' usa 'contactOrGroup' como PK, ajuste aqui também.
-                        conversationId: receiverId === ws.id ? senderId : receiverId, // ID do outro lado da conversa
-                        messageId: messageId, // Sort key para Messages
-                        senderId: senderId,
-                        receiverId: receiverId,
-                        content: content,
-                        mediaUrl: mediaUrl || null,
-                        timestamp: msgTimestamp || Date.now(), // Usar timestamp do cliente ou do servidor
-                        createdAt: now
-                    };
-
-                    try {
-                        // Salvar mensagem no DynamoDB (tabela Messages)
-                        await docClient.put({
-                            TableName: DYNAMODB_TABLE_MESSAGES,
-                            Item: messageItem
-                        }).promise();
-                        console.log(`[DynamoDB] Mensagem ${messageId} de ${senderId} para ${receiverId} salva.`);
-
-                        // Atualizar a última mensagem na tabela Conversations
-                        // CORREÇÃO: Usar 'contactOrGroup' como a chave primária da tabela Conversations
-                        const conversationToUpdateKey = messageItem.conversationId; // O ID do outro lado da conversa
-
-                        await docClient.update({
-                            TableName: DYNAMODB_TABLE_CONVERSATIONS,
-                            Key: { 'contactOrGroup': conversationToUpdateKey }, // <-- CORRIGIDO AQUI
-                            UpdateExpression: 'SET lastMessageContent = :lmc, lastMessageTimestamp = :lmt',
-                            ExpressionAttributeValues: {
-                                ':lmc': content,
-                                ':lmt': messageItem.timestamp
-                            },
-                            ReturnValues: 'UPDATED_NEW'
-                        }).promise();
-                        console.log(`[DynamoDB] Conversa ${conversationToUpdateKey} atualizada com última mensagem.`);
-
-
-                        // Reencaminha a mensagem para o receptor se ele estiver online
-                        const receiverWs = wsClientsMap.get(receiverId);
-                        if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
-                            receiverWs.send(JSON.stringify({ type: 'newMessage', data: messageItem }));
-                            console.log(`[WebSocket-Commands] Mensagem de chat encaminhada para ${receiverId}.`);
+                    // Aqui 'data' ainda é esperado
+                    if (parsedMessage.data) {
+                        const { senderId, receiverId, content, mediaUrl, timestamp: msgTimestamp } = parsedMessage.data;
+                        if (!senderId || !receiverId || !content) {
+                            console.warn('[WebSocket-Commands] Mensagem de chat incompleta:', parsedMessage);
+                            return;
                         }
-                    } catch (error) {
-                        console.error('[DynamoDB] Erro ao salvar/reencaminhar mensagem de chat:', error);
+
+                        const messageId = uuidv4();
+                        const now = new Date().toISOString();
+
+                        const messageItem = {
+                            // CORREÇÃO: A chave 'conversationId' aqui é a chave de partição da tabela Messages.
+                            // Assumindo que a conversa é entre o remetente e o receptor.
+                            // Se 'Messages' usa 'contactOrGroup' como PK, ajuste aqui também.
+                            conversationId: receiverId === ws.id ? senderId : receiverId, // ID do outro lado da conversa
+                            messageId: messageId, // Sort key para Messages
+                            senderId: senderId,
+                            receiverId: receiverId,
+                            content: content,
+                            mediaUrl: mediaUrl || null,
+                            timestamp: msgTimestamp || Date.now(), // Usar timestamp do cliente ou do servidor
+                            createdAt: now
+                        };
+
+                        try {
+                            // Salvar mensagem no DynamoDB (tabela Messages)
+                            await docClient.put({
+                                TableName: DYNAMODB_TABLE_MESSAGES,
+                                Item: messageItem
+                            }).promise();
+                            console.log(`[DynamoDB] Mensagem ${messageId} de ${senderId} para ${receiverId} salva.`);
+
+                            // Atualizar a última mensagem na tabela Conversations
+                            // CORREÇÃO: Usar 'contactOrGroup' como a chave primária da tabela Conversations
+                            const conversationToUpdateKey = messageItem.conversationId; // O ID do outro lado da conversa
+
+                            await docClient.update({
+                                TableName: DYNAMODB_TABLE_CONVERSATIONS,
+                                Key: { 'contactOrGroup': conversationToUpdateKey }, // <-- CORRIGIDO AQUI
+                                UpdateExpression: 'SET lastMessageContent = :lmc, lastMessageTimestamp = :lmt',
+                                ExpressionAttributeValues: {
+                                    ':lmc': content,
+                                    ':lmt': messageItem.timestamp
+                                },
+                                ReturnValues: 'UPDATED_NEW'
+                            }).promise();
+                            console.log(`[DynamoDB] Conversa ${conversationToUpdateKey} atualizada com última mensagem.`);
+
+
+                            // Reencaminha a mensagem para o receptor se ele estiver online
+                            const receiverWs = wsClientsMap.get(receiverId);
+                            if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+                                receiverWs.send(JSON.stringify({ type: 'newMessage', data: messageItem }));
+                                console.log(`[WebSocket-Commands] Mensagem de chat encaminhada para ${receiverId}.`);
+                            }
+                        } catch (error) {
+                            console.error('[DynamoDB] Erro ao salvar/reencaminhar mensagem de chat:', error);
+                        }
+                    } else {
+                        console.warn('[WebSocket-Commands] Mensagem chatMessage sem objeto data:', parsedMessage);
                     }
                     break;
 
                 case 'audioControl':
                     // Comando para iniciar/parar streaming de áudio do filho
-                    if (parentId && data && data.targetChildId && data.action) {
-                        const targetChildWs = wsClientsMap.get(data.targetChildId);
+                    // Aqui 'data' ainda é esperado
+                    if (parentId && parsedMessage.data && parsedMessage.data.targetChildId && parsedMessage.data.action) {
+                        const targetChildWs = wsClientsMap.get(parsedMessage.data.targetChildId);
                         if (targetChildWs && targetChildWs.type === 'child' && targetChildWs.readyState === WebSocket.OPEN) {
-                            targetChildWs.send(JSON.stringify({ type: 'audioControl', action: data.action }));
-                            console.log(`[WebSocket-Commands] Comando de áudio '${data.action}' enviado para ${data.targetChildId} por ${parentId}.`);
+                            targetChildWs.send(JSON.stringify({ type: 'audioControl', action: parsedMessage.data.action }));
+                            console.log(`[WebSocket-Commands] Comando de áudio '${parsedMessage.data.action}' enviado para ${parsedMessage.data.targetChildId} por ${parentId}.`);
                         } else {
-                            ws.send(JSON.stringify({ type: 'error', message: 'Filho offline ou não encontrado para controle de áudio.', targetChildId: data.targetChildId }));
-                            console.warn(`[WebSocket-Commands] Filho ${data.targetChildId} não encontrado para comando de áudio.`);
+                            ws.send(JSON.stringify({ type: 'error', message: 'Filho offline ou não encontrado para controle de áudio.', targetChildId: parsedMessage.data.targetChildId }));
+                            console.warn(`[WebSocket-Commands] Filho ${parsedMessage.data.targetChildId} não encontrado para comando de áudio.`);
                         }
                     } else {
                         console.warn('[WebSocket-Commands] Mensagem audioControl incompleta:', parsedMessage);
