@@ -39,7 +39,9 @@ app.get('/', (req, res) => {
     res.send('Servidor de Monitoramento Parental Online!');
 });
 
-// --- Rota para Registrar um Filho ---
+// --- Rota para Registrar um Filho via HTTP (Mantida, mas a prioridade é o WS) ---
+// Esta rota é útil para registro inicial ou se o app filho quiser registrar via HTTP.
+// No entanto, o registro via WebSocket 'childConnect' será a principal forma.
 app.post('/register-child', async (req, res) => {
     const { id, name, parentId } = req.body;
 
@@ -53,30 +55,35 @@ app.post('/register-child', async (req, res) => {
             id: id,
             name: name,
             parentId: parentId,
-            registrationDate: new Date().toISOString()
+            registrationDate: new Date().toISOString(),
+            connected: false // Assume que não está conectado via WS no momento do registro HTTP
         }
     };
 
     try {
         await docClient.put(params).promise();
-        console.log(`[DynamoDB] Filho registrado/atualizado: ${name} (ID: ${id}) para o pai ${parentId}`);
-        res.status(200).send('Filho registrado com sucesso.');
+        console.log(`[DynamoDB] Filho registrado/atualizado via HTTP: ${name} (ID: ${id}) para o pai ${parentId}`);
+        res.status(200).send('Filho registrado com sucesso via HTTP.');
     } catch (error) {
-        console.error('[DynamoDB_ERROR] Erro ao registrar filho:', error);
-        res.status(500).send('Erro ao registrar filho.');
+        console.error('[DynamoDB_ERROR] Erro ao registrar filho via HTTP:', error);
+        res.status(500).send('Erro ao registrar filho via HTTP.');
     }
 });
 
 // --- Rota para Listar Filhos Registrados por Parent ID ---
 app.get('/get-registered-children', async (req, res) => {
     // Para listar todos os filhos, ou você pode adicionar um query param `parentId` para filtrar
-    // const { parentId } = req.query; // Exemplo de como pegar um parentId do query
+    const { parentId } = req.query; // Exemplo de como pegar um parentId do query
+
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
-        // Se você quiser filtrar por parentId:
-        // FilterExpression: 'parentId = :parentId',
-        // ExpressionAttributeValues: { ':parentId': parentId }
     };
+
+    // Se um parentId for fornecido, adicione a expressão de filtro
+    if (parentId) {
+        params.FilterExpression = 'parentId = :parentId';
+        params.ExpressionAttributeValues = { ':parentId': parentId };
+    }
 
     try {
         const data = await docClient.scan(params).promise();
@@ -154,7 +161,7 @@ const server = http.createServer(app); // Cria um servidor HTTP usando o app Exp
 const wssCommands = new WebSocket.Server({ noServer: true }); // WebSocket Server para comandos (GPS, Chat)
 const wssAudio = new WebSocket.Server({ noServer: true }); // WebSocket Server para áudio (se você quiser stream de áudio, caso contrário, pode remover)
 
-// --- MODIFICAÇÃO NOVA: Mapeamento de Conexões WebSocket ativas ---
+// --- Mapeamento de Conexões WebSocket ativas ---
 // Isso nos permitirá encontrar clientes específicos pelo ID e tipo.
 // Usaremos um Map para melhor performance na busca.
 const activeConnections = new Map(); // Key: clientId (e.g., childId or parentId), Value: WebSocket instance
@@ -169,8 +176,28 @@ function addActiveConnection(id, type, ws) {
 }
 
 // Função auxiliar para remover conexões
-function removeActiveConnection(id) {
+async function removeActiveConnection(id) {
     if (activeConnections.has(id)) {
+        const ws = activeConnections.get(id);
+        if (ws && ws.type === 'child') {
+            // Se for um filho se desconectando, atualize o status 'connected' no DynamoDB
+            const params = {
+                TableName: DYNAMODB_TABLE_CHILDREN,
+                Key: { id: ws.id },
+                UpdateExpression: 'SET connected = :connected, lastConnected = :lastConnected',
+                ExpressionAttributeValues: {
+                    ':connected': false,
+                    ':lastConnected': new Date().toISOString()
+                },
+                ReturnValues: 'UPDATED_NEW'
+            };
+            try {
+                await docClient.update(params).promise();
+                console.log(`[DynamoDB] Status de conexão do filho ${ws.id} atualizado para 'false'.`);
+            } catch (err) {
+                console.error(`[DynamoDB_ERROR] Erro ao atualizar status de desconexão do filho ${ws.id}: ${err.message}`, err);
+            }
+        }
         activeConnections.delete(id);
         console.log(`[WebSocket-Manager] Conexão removida: ${id}. Total de conexões ativas: ${activeConnections.size}`);
     }
@@ -189,26 +216,54 @@ wssCommands.on('connection', ws => {
             return;
         }
 
-        const { type, childId, parentId, data } = parsedMessage;
+        // Garanta que 'childName' está sendo desestruturado do 'parsedMessage'
+        const { type, childId, parentId, childName, data } = parsedMessage; 
 
-        // --- MODIFICAÇÃO NOVA: Atribui ID e Tipo à conexão na primeira mensagem de identificação ---
-        // Isso é crucial para que o `activeConnections` funcione.
-        if (type === 'childConnect' && childId) {
+        // --- MODIFICAÇÃO CHAVE: Atribui ID e Tipo à conexão e SALVA/ATUALIZA no DynamoDB ---
+        if (type === 'childConnect' && childId && parentId && childName) { // Verifique se todos os campos importantes estão presentes
             ws.id = childId;
             ws.type = 'child';
             addActiveConnection(childId, 'child', ws);
-            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}`);
-            // Opcional: Se o filho manda o parentId, você pode salvá-lo na conexão também.
-            ws.parentId = parentId;
+            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, Nome: ${childName}`);
+            ws.parentId = parentId; // Armazena parentId na conexão WebSocket
+
+            // =========================================================================================
+            // *** ESTE É O BLOCO DE CÓDIGO QUE SALVA/ATUALIZA O FILHO NO DYNAMODB VIA WS ***
+            // =========================================================================================
+            const params = {
+                TableName: DYNAMODB_TABLE_CHILDREN,
+                Item: {
+                    id: childId, // Use 'id' como chave primária
+                    name: childName,
+                    parentId: parentId,
+                    lastConnected: new Date().toISOString(), // Adiciona um timestamp da última conexão WS
+                    connected: true // Marca como conectado via WebSocket
+                }
+            };
+            try {
+                await docClient.put(params).promise();
+                console.log(`[DynamoDB] Filho ${childName} (${childId}) atualizado/salvo via WS na tabela '${DYNAMODB_TABLE_CHILDREN}'.`);
+            } catch (err) {
+                console.error(`[DynamoDB_ERROR] Erro ao salvar dados do filho via WS no DynamoDB: ${err.message}`, err);
+            }
+            // =========================================================================================
+            // *** FIM DO BLOCO DE CÓDIGO CHAVE ***
+            // =========================================================================================
+
         } else if (type === 'parentConnect' && parentId && data && data.listeningToChildId) {
             ws.id = parentId;
             ws.type = 'parent';
             ws.listeningToChildId = data.listeningToChildId; // Guarda qual filho este pai está ouvindo
             addActiveConnection(parentId, 'parent', ws);
             console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${ws.listeningToChildId}`);
+        } else {
+             // Se a primeira mensagem não for de conexão, e o WS ainda não tem ID, loga um aviso.
+             if (!ws.id) {
+                console.warn(`[WebSocket-Commands] Mensagem recebida antes da identificação da conexão: ${JSON.stringify(parsedMessage)}`);
+             }
         }
 
-        // --- Processamento de Mensagens ---
+        // --- Processamento de Outras Mensagens ---
         switch (type) {
             case 'locationUpdate':
                 if (childId && data && data.latitude !== undefined && data.longitude !== undefined) {
@@ -252,16 +307,19 @@ wssCommands.on('connection', ws => {
                 }
                 break;
 
-            case 'parentConnect': // Já é tratado na identificação inicial, mas pode ter lógica adicional aqui
-                // ws.id, ws.type e ws.listeningToChildId já devem estar definidos.
+            case 'parentConnect': 
+                // A lógica principal de parentConnect é tratada no 'if' acima.
+                // Esta parte do switch pode ser removida se a lógica no 'if' for suficiente.
                 console.log(`[WebSocket-Commands] Pai ${ws.id} reafirmou conexão, ouvindo filho: ${ws.listeningToChildId}`);
                 break;
 
-            case 'childConnect': // Já é tratado na identificação inicial
-                console.log(`[WebSocket-Commands] Filho ${ws.id} reafirmou conexão.`);
+            case 'childConnect': 
+                // Esta parte do switch pode ser removida ou mantida para logs adicionais,
+                // mas a gravação no DynamoDB já foi feita no 'if' inicial.
+                console.log(`[WebSocket-Commands] Filho ${ws.id} reafirmou conexão (após registro inicial).`);
                 break;
-
-            // --- MODIFICAÇÃO NOVA: Manipulador para solicitação de localização do pai ---
+            
+            // --- Manipulador para solicitação de localização do pai ---
             case 'requestLocation':
                 const requestedChildId = data.childId;
                 const requestingParentId = ws.id; // O ID do pai que enviou a mensagem
@@ -300,7 +358,6 @@ wssCommands.on('connection', ws => {
                     console.warn('[WebSocket-Commands] Mensagem requestLocation inválida: childId ou parentId ausente.');
                 }
                 break;
-            // --- FIM MODIFICAÇÃO NOVA ---
 
             // Você pode adicionar outros cases para mensagens de chat, etc.
             default:
@@ -309,10 +366,11 @@ wssCommands.on('connection', ws => {
         }
     });
 
-    ws.on('close', () => {
+    ws.on('close', async () => {
         if (ws.id) {
             console.log(`[WebSocket-Commands] Cliente desconectado: ID: ${ws.id}, Tipo: ${ws.type || 'desconhecido'}`);
-            removeActiveConnection(ws.id);
+            // Atualize o status 'connected' no DynamoDB se for um filho
+            await removeActiveConnection(ws.id);
         } else {
             console.log('[WebSocket-Commands] Cliente desconectado (ID não definido).');
         }
@@ -320,6 +378,10 @@ wssCommands.on('connection', ws => {
 
     ws.on('error', error => {
         console.error('[WebSocket-Commands] Erro no WebSocket:', error);
+        // Em caso de erro, também tente remover a conexão
+        if (ws.id) {
+            removeActiveConnection(ws.id);
+        }
     });
 });
 
