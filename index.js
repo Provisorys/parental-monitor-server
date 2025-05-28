@@ -210,7 +210,7 @@ wssCommands.on('connection', ws => {
             ws.id = childId;
             ws.type = 'child';
             addActiveConnection(childId, 'child', ws);
-            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, Nome: ${childName}`);
+            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, childNome: ${childName}`);
             ws.parentId = parentId;
 
             const params = {
