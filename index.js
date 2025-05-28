@@ -41,9 +41,9 @@ app.get('/', (req, res) => {
 
 // --- Rota para Registrar um Filho via HTTP (Mantida, mas a prioridade é o WS) ---
 app.post('/register-child', async (req, res) => {
-    const { id, name, parentId } = req.body;
+    const { id, childName, parentId } = req.body;
 
-    if (!id || !name || !parentId) {
+    if (!id || !childName || !parentId) {
         return res.status(400).send('ID do filho, nome e ID do pai são obrigatórios.');
     }
 
