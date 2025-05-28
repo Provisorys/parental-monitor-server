@@ -300,8 +300,6 @@ wssCommands.on('connection', ws => {
     ws.on('message', async message => {
         try {
             const parsedMessage = JSON.parse(message);
-            // Removi 'data' da desestruturação aqui, pois agora latitude/longitude/timestamp
-            // são esperados diretamente na mensagem de nível superior para 'locationUpdate'.
             const { type, childId, parentId } = parsedMessage; 
 
             switch (type) {
@@ -311,8 +309,26 @@ wssCommands.on('connection', ws => {
                         ws.id = childId;
                         ws.type = 'child';
                         ws.parentId = parentId; // Armazena o parentId associado
-                        ws.send(JSON.stringify({ type: 'status', message: `Conectado como filho ${childId}.` }));
-                        console.log(`[WebSocket-Commands] Filho conectado e identificado: Child ID ${childId}, Parent ID ${parentId}`);
+
+                        // --- ADIÇÃO PARA BUSCAR O CHILD NAME ---
+                        let childName = childId; // Fallback para childId se não encontrar
+                        try {
+                            const params = {
+                                TableName: DYNAMODB_TABLE_CHILDREN,
+                                Key: { 'childId': childId },
+                                ProjectionExpression: 'childName'
+                            };
+                            const result = await docClient.get(params).promise();
+                            if (result.Item && result.Item.childName) {
+                                childName = result.Item.childName;
+                            }
+                        } catch (err) {
+                            console.error(`[DynamoDB] Erro ao buscar childName para ${childId}:`, err);
+                        }
+                        // --- FIM DA ADIÇÃO ---
+
+                        ws.send(JSON.stringify({ type: 'status', message: `Conectado como filho ${childName} (ID: ${childId}).` }));
+                        console.log(`[WebSocket-Commands] Filho conectado e identificado: Nome: ${childName}, ID: ${childId}, Parent ID: ${parentId}`); // LOG ATUALIZADO AQUI
                     } else {
                         ws.send(JSON.stringify({ type: 'error', message: 'childId ausente na mensagem childConnect.' }));
                         console.warn('[WebSocket-Commands] Mensagem childConnect sem childId.');
@@ -342,8 +358,8 @@ wssCommands.on('connection', ws => {
                         const params = {
                             TableName: DYNAMODB_TABLE_LOCATIONS, // Sua tabela GPSintegracao
                             Item: {
-                                locationId: uuidv4(),                                
-								childId: childId,
+                                locationId: uuidv4(),                          
+                                childId: childId,
                                 parentId: parentId, // Incluir parentId aqui também
                                 latitude: latitude, // <--- ALTERADO AQUI
                                 longitude: longitude, // <--- ALTERADO AQUI
@@ -358,14 +374,24 @@ wssCommands.on('connection', ws => {
                             console.log(`[WebSocket-Commands] Localização WS de ${childId} salva: Lat=${latitude}, Lng=${longitude}`);
 
                             // Reencaminha a localização para o pai que está ouvindo este filho
+                            console.log(`[DEBUG] Tentando encaminhar localização de ${childId} para pais...`); // NOVO LOG
+                            let forwardedToParent = false; // Flag para saber se encaminhou para algum pai
+
                             wsClientsMap.forEach((clientWs, id) => {
+                                console.log(`[DEBUG] Verificando cliente ID: ${id}, Type: ${clientWs.type}, ListeningToChildId: ${clientWs.listeningToChildId}, ReadyState: ${clientWs.readyState}`); // NOVO LOG DETALHADO
                                 if (clientWs.type === 'parent' && clientWs.listeningToChildId === childId && clientWs.readyState === WebSocket.OPEN) {
                                     // Reencaminha a mensagem original (ou um novo objeto com os dados corretos)
                                     // Certifique-se que o 'data' encapsula as informações de localização para o pai
                                     clientWs.send(JSON.stringify({ type: 'locationUpdate', data: { childId, parentId, latitude, longitude, timestamp, accuracy, speed } }));
                                     console.log(`[WebSocket-Commands] Localização de ${childId} encaminhada para o pai ${id}.`);
+                                    forwardedToParent = true; // Define a flag como true
                                 }
                             });
+
+                            if (!forwardedToParent) { // NOVO LOG
+                                console.warn(`[WebSocket-Commands] NENHUM pai encontrado online ou ouvindo o filho ${childId} para encaminhar a localização.`);
+                            }
+
                         } catch (err) {
                             console.error('[DynamoDB_ERROR] Erro ao salvar localização via WS:', err);
                         }
