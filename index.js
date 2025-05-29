@@ -27,368 +27,189 @@ const s3 = new AWS.S3();
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
 const DYNAMODB_TABLE_CONVERSATIONS = 'Conversations';
 const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Tabela para dados de localização
-const DYNAMODB_TABLE_CHILDREN = 'Children'; // Tabela para informações dos filhos
+const DYNAMODB_TABLE_CHILDREN = 'Children';
 
-// --- Configuração do Express (middlewares) ---
-app.use(cors()); // Habilita o CORS para todas as rotas
-app.use(bodyParser.json()); // Para analisar corpos de requisição JSON
-app.use(bodyParser.urlencoded({ extended: true })); // Para analisar corpos de requisição URL-encoded
+// --- MIDDLEWARES ---
+app.use(cors()); // Habilita CORS para todas as rotas
+app.use(bodyParser.json()); // Para parsing de application/json
+app.use(bodyParser.urlencoded({ extended: true })); // Para parsing de application/x-www-form-urlencoded
 
-// --- Rota de Teste ---
+// --- Rotas HTTP (APIs REST) ---
+
+// Rota de teste
 app.get('/', (req, res) => {
-    res.send('Servidor de Monitoramento Parental Online!');
+    console.log('[HTTP] Requisição GET na rota raiz.');
+    res.send('Servidor WebSocket e HTTP rodando!');
 });
 
-// --- Rota para Registrar um Filho via HTTP (Mantida, mas a prioridade é o WS) ---
-app.post('/register-child', async (req, res) => {
-    const { id, childName, parentId } = req.body; // childName já vem do body
+// Rota para registrar um novo filho
+app.post('/registerChild', upload.none(), async (req, res) => {
+    console.log('[HTTP] Requisição POST para /registerChild.');
+    const { parentId, childName, childToken, fcmToken } = req.body;
 
-    if (!id || !childName || !parentId) {
-        return res.status(400).send('ID do filho, nome e ID do pai são obrigatórios.');
+    if (!parentId || !childName || !childToken || !fcmToken) {
+        console.warn('[HTTP_ERROR] Dados incompletos para registro de filho.');
+        return res.status(400).send('Dados incompletos.');
     }
+
+    const childId = uuidv4(); // Gera um UUID para o childId
 
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
         Item: {
-            childId: id, // CORRIGIDO: Usando 'childId' como a chave primária
-            childName: childName, // CORRIGIDO: Alterado 'name' para 'childName'
+            childId: childId,
             parentId: parentId,
-            registrationDate: new Date().toISOString(),
-            connected: false // Assume que não está conectado via WS no momento do registro HTTP
+            childName: childName,
+            childToken: childToken,
+            fcmToken: fcmToken,
+            registeredAt: new Date().toISOString()
         }
     };
 
     try {
         await docClient.put(params).promise();
-        console.log(`[DynamoDB] Filho registrado/atualizado via HTTP: ${childName} (ID: ${id}) para o pai ${parentId}`); // CORRIGIDO: Usando 'childName' no log
-        res.status(200).send('Filho registrado com sucesso via HTTP.');
+        console.log(`[DynamoDB] Filho ${childName} (${childId}) registrado com sucesso.`);
+        res.status(201).json({ childId: childId, message: 'Filho registrado com sucesso!' });
     } catch (error) {
-        console.error('[DynamoDB_ERROR] Erro ao registrar filho via HTTP:', error);
-        res.status(500).send('Erro ao registrar filho via HTTP.');
+        console.error('[DynamoDB_ERROR] Erro ao registrar filho:', error);
+        res.status(500).send('Erro ao registrar filho.');
     }
 });
 
-// --- Rota para Listar Filhos Registrados por Parent ID ---
-app.get('/get-registered-children', async (req, res) => {
+// Rota para obter todos os filhos registrados - GARANTIDA QUE ESTÁ AQUI
+app.get('/children', async (req, res) => {
+    console.log('[HTTP] Requisição GET para /children.');
     const { parentId } = req.query;
+
+    if (!parentId) {
+        console.warn('[HTTP_ERROR] parentId não fornecido para listar filhos.');
+        return res.status(400).send('parentId é obrigatório.');
+    }
 
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
+        FilterExpression: 'parentId = :pId',
+        ExpressionAttributeValues: {
+            ':pId': parentId
+        }
     };
-
-    if (parentId) {
-        params.FilterExpression = 'parentId = :parentId';
-        params.ExpressionAttributeValues = { ':parentId': parentId };
-    }
 
     try {
         const data = await docClient.scan(params).promise();
-        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela '${DYNAMODB_TABLE_CHILDREN}'. Encontrados ${data.Items.length} filhos.`);
-        res.status(200).json(data.Items);
+        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela 'Children'. Encontrados ${data.Items.length} filhos.`);
+        res.json(data.Items);
     } catch (error) {
-        console.error('[DynamoDB_ERROR] Erro ao listar filhos registrados:', error);
-        res.status(500).send('Erro ao listar filhos registrados.');
+        console.error('[DynamoDB_ERROR] Erro ao obter filhos:', error);
+        res.status(500).send('Erro ao obter filhos.');
     }
 });
 
-// --- Rotas de Upload de Áudio (mantidas como estão, usando S3) ---
-app.post('/upload-audio', upload.single('audio'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).send('Nenhum arquivo de áudio enviado.');
-    }
+// Rota para obter mensagens de uma conversa específica (ex: childId)
+app.get('/messages', async (req, res) => {
+    console.log('[HTTP] Requisição GET para /messages.');
+    const { conversationId } = req.query;
 
-    const { childId, parentId, conversationId } = req.body;
-    if (!childId || !parentId || !conversationId) {
-        return res.status(400).send('childId, parentId e conversationId são obrigatórios.');
+    if (!conversationId) {
+        console.warn('[HTTP_ERROR] conversationId não fornecido para obter mensagens.');
+        return res.status(400).send('conversationId é obrigatório.');
     }
-
-    const s3BucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
-    const audioFileName = `audio-${uuidv4()}.opus`;
-    const s3Key = `conversations/${conversationId}/${audioFileName}`;
 
     const params = {
-        Bucket: s3BucketName,
-        Key: s3Key,
-        Body: req.file.buffer,
-        ContentType: req.file.mimetype
+        TableName: DYNAMODB_TABLE_MESSAGES,
+        KeyConditionExpression: 'conversationId = :cid',
+        ExpressionAttributeValues: {
+            ':cid': conversationId
+        },
+        ScanIndexForward: true // Ordenar por timestamp
     };
 
     try {
-        await s3.upload(params).promise();
-        const audioUrl = `https://${s3BucketName}.s3.${AWS.config.region}.amazonaws.com/${s3Key}`;
-
-        const messageParams = {
-            TableName: DYNAMODB_TABLE_MESSAGES,
-            Item: {
-                messageId: uuidv4(),
-                conversationId: conversationId,
-                senderId: childId,
-                receiverId: parentId,
-                type: 'audio',
-                content: audioUrl,
-                timestamp: new Date().toISOString()
-            }
-        };
-        await docClient.put(messageParams).promise();
-
-        const conversationParams = {
-            TableName: DYNAMODB_TABLE_CONVERSATIONS,
-            Key: { conversationId: conversationId },
-            UpdateExpression: 'SET lastMessage = :lm, lastMessageTimestamp = :lmt',
-            ExpressionAttributeValues: {
-                ':lm': 'Mensagem de áudio',
-                ':lmt': new Date().toISOString()
-            }
-        };
-        await docClient.update(conversationParams).promise();
-
-        console.log(`[S3] Áudio enviado para S3: ${audioUrl}`);
-        res.status(200).json({ message: 'Áudio enviado e registrado com sucesso!', audioUrl: audioUrl });
+        const data = await docClient.query(params).promise();
+        console.log(`[DynamoDB] Mensagens para conversa ${conversationId} solicitadas. Encontradas ${data.Items.length} mensagens.`);
+        res.json(data.Items);
     } catch (error) {
-        console.error('[S3_ERROR] Erro ao fazer upload do áudio ou registrar mensagem:', error);
-        res.status(500).send('Erro ao processar o upload do áudio.');
+        console.error('[DynamoDB_ERROR] Erro ao obter mensagens:', error);
+        res.status(500).send('Erro ao obter mensagens.');
     }
 });
 
-// --- Criação do Servidor HTTP e WebSocket ---
-const server = http.createServer(app);
-const wssCommands = new WebSocket.Server({ noServer: true });
-const wssAudio = new WebSocket.Server({ noServer: true });
+// Rota para obter o histórico de localizações
+app.get('/locations', async (req, res) => {
+    console.log('[HTTP] Requisição GET para /locations.');
+    const { childId, startDate, endDate } = req.query; // childId é obrigatório para localização
 
-const activeConnections = new Map();
-
-function addActiveConnection(id, type, ws) {
-    if (!id || !type || !ws) return;
-    ws.id = id;
-    ws.type = type;
-    activeConnections.set(id, ws);
-    console.log(`[WebSocket-Manager] Conexão ${type} adicionada/atualizada: ${id}. Total de conexões ativas: ${activeConnections.size}`);
-}
-
-async function removeActiveConnection(id) {
-    if (activeConnections.has(id)) {
-        const ws = activeConnections.get(id);
-        if (ws && ws.type === 'child') {
-            const params = {
-                TableName: DYNAMODB_TABLE_CHILDREN,
-                Key: { childId: ws.id }, // CORRIGIDO: Usando 'childId' como a chave primária
-                UpdateExpression: 'SET connected = :connected, lastConnected = :lastConnected',
-                ExpressionAttributeValues: {
-                    ':connected': false,
-                    ':lastConnected': new Date().toISOString()
-                },
-                ReturnValues: 'UPDATED_NEW'
-            };
-            try {
-                await docClient.update(params).promise();
-                console.log(`[DynamoDB] Status de conexão do filho ${ws.id} atualizado para 'false'.`);
-            } catch (err) {
-                console.error(`[DynamoDB_ERROR] Erro ao atualizar status de desconexão do filho ${ws.id}: ${err.message}`, err);
-            }
-        }
-        activeConnections.delete(id);
-        console.log(`[WebSocket-Manager] Conexão removida: ${id}. Total de conexões ativas: ${activeConnections.size}`);
+    if (!childId) {
+        console.warn('[HTTP_ERROR] childId não fornecido para obter localizações.');
+        return res.status(400).send('childId é obrigatório.');
     }
-}
 
-// --- WebSocket de Comandos (GPS, Chat) ---
-wssCommands.on('connection', ws => {
-    console.log('[WebSocket-Commands] Cliente conectado.');
-
-    ws.on('message', async message => {
-        let parsedMessage;
-        try {
-            parsedMessage = JSON.parse(message);
-        } catch (e) {
-            console.error('[WebSocket-Commands] Erro ao analisar mensagem JSON:', e);
-            return;
+    const params = {
+        TableName: DYNAMODB_TABLE_LOCATIONS,
+        KeyConditionExpression: 'childId = :cId',
+        ExpressionAttributeValues: {
+            ':cId': childId
         }
+    };
 
-        const { type, childId, parentId, childName, data } = parsedMessage;
+    // Adiciona filtro de data se fornecido
+    if (startDate && endDate) {
+        params.KeyConditionExpression += ' AND #ts BETWEEN :sDate AND :eDate';
+        params.ExpressionAttributeNames = { '#ts': 'timestamp' }; // timestamp é uma palavra reservada no DynamoDB
+        params.ExpressionAttributeValues[':sDate'] = parseInt(startDate);
+        params.ExpressionAttributeValues[':eDate'] = parseInt(endDate);
+    }
 
-        if (type === 'childConnect' && childId && parentId && childName) {
-            ws.id = childId;
-            ws.type = 'child';
-            addActiveConnection(childId, 'child', ws);
-            console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, Nome: ${childName}`);
-            ws.parentId = parentId;
-
-            const params = {
-                TableName: DYNAMODB_TABLE_CHILDREN,
-                Item: {
-                    childId: childId, // CORRIGIDO: Usando 'childId' como a chave primária
-                    childName: childName, // CORRIGIDO: Alterado 'name' para 'childName'
-                    parentId: parentId,
-                    lastConnected: new Date().toISOString(),
-                    connected: true
-                }
-            };
-            try {
-                await docClient.put(params).promise();
-                console.log(`[DynamoDB] Filho ${childName} (${childId}) atualizado/salvo via WS na tabela '${DYNAMODB_TABLE_CHILDREN}'.`);
-            } catch (err) {
-                console.error(`[DynamoDB_ERROR] Erro ao salvar dados do filho via WS no DynamoDB: ${err.message}`, err);
-            }
-
-        } else if (type === 'parentConnect' && parentId && data && data.listeningToChildId) {
-            ws.id = parentId;
-            ws.type = 'parent';
-            ws.listeningToChildId = data.listeningToChildId;
-            addActiveConnection(parentId, 'parent', ws);
-            console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${ws.listeningToChildId}`);
-        } else {
-             if (!ws.id) {
-                console.warn(`[WebSocket-Commands] Mensagem recebida antes da identificação da conexão: ${JSON.stringify(parsedMessage)}`);
-             }
-        }
-
-        switch (type) {
-            case 'locationUpdate':
-                if (childId && data && data.latitude !== undefined && data.longitude !== undefined) {
-                    const params = {
-                        TableName: DYNAMODB_TABLE_LOCATIONS,
-                        Item: {
-                            childId: childId,
-                            timestamp: new Date().toISOString(),
-                            latitude: data.latitude,
-                            longitude: data.longitude
-                        }
-                    };
-                    try {
-                        await docClient.put(params).promise();
-                        console.log(`[WebSocket-Commands] Localização WS de ${childId} salva: Lat=${data.latitude}, Lng=${data.longitude}`);
-
-                        console.log(`[DEBUG] Tentando encaminhar localização de ${childId} para pais...`);
-                        let parentFoundAndListening = false;
-                        activeConnections.forEach(client => {
-                            if (client.type === 'parent' && client.listeningToChildId === childId && client.readyState === WebSocket.OPEN) {
-                                client.send(JSON.stringify({
-                                    type: 'locationUpdate',
-                                    childId: childId,
-                                    latitude: data.latitude,
-                                    longitude: data.longitude,
-                                    timestamp: new Date().toISOString()
-                                }));
-                                console.log(`[WebSocket-Commands] Localização de ${childId} encaminhada para o pai ${client.id}.`);
-                                parentFoundAndListening = true;
-                            }
-                        });
-                        if (!parentFoundAndListening) {
-                            console.log(`[WebSocket-Commands] NENHUM pai encontrado online ou ouvindo o filho ${childId} para encaminhar a localização.`);
-                        }
-
-                    } catch (error) {
-                        console.error('[DynamoDB_ERROR] Erro ao salvar localização no DynamoDB:', error);
-                    }
-                }
-                break;
-
-            case 'parentConnect': 
-                console.log(`[WebSocket-Commands] Pai ${ws.id} reafirmou conexão, ouvindo filho: ${ws.listeningToChildId}`);
-                break;
-
-            case 'childConnect': 
-                console.log(`[WebSocket-Commands] Filho ${ws.id} reafirmou conexão (após registro inicial).`);
-                break;
-            
-            case 'requestLocation':
-                const requestedChildId = data.childId;
-                const requestingParentId = ws.id;
-
-                if (requestedChildId && requestingParentId) {
-                    console.log(`[WebSocket-Commands] Pai ${requestingParentId} solicitou localização do filho ${requestedChildId}.`);
-
-                    const childSocket = activeConnections.get(requestedChildId);
-
-                    if (childSocket && childSocket.type === 'child' && childSocket.readyState === WebSocket.OPEN) {
-                        childSocket.send(JSON.stringify({
-                            type: 'getLocation',
-                            childId: requestedChildId, // Adicionei esta linha
-                            requestedBy: requestingParentId
-                        }));
-                        console.log(`[WebSocket-Commands] Mensagem 'getLocation' enviada para o filho ${requestedChildId}.`);
-                        ws.send(JSON.stringify({
-                            type: 'locationRequestStatus',
-                            childId: requestedChildId,
-                            status: 'success',
-                            message: 'Solicitação de localização enviada ao filho.'
-                        }));
-                    } else {
-                        console.warn(`[WebSocket-Commands] Filho ${requestedChildId} não encontrado ou não online para responder à solicitação de localização.`);
-                        ws.send(JSON.stringify({
-                            type: 'locationRequestStatus',
-                            childId: requestedChildId,
-                            status: 'error',
-                            message: 'Filho não está online ou não foi encontrado para responder à solicitação.'
-                        }));
-                    }
-                } else {
-                    console.warn('[WebSocket-Commands] Mensagem requestLocation inválida: childId ou parentId ausente.');
-                }
-                break;
-
-            default:
-                console.warn(`[WebSocket-Commands] Tipo de mensagem desconhecido: ${type}`);
-                break;
-        }
-    });
-
-    ws.on('close', async () => {
-        if (ws.id) {
-            console.log(`[WebSocket-Commands] Cliente desconectado: ID: ${ws.id}, Tipo: ${ws.type || 'desconhecido'}`);
-            await removeActiveConnection(ws.id);
-        } else {
-            console.log('[WebSocket-Commands] Cliente desconectado (ID não definido).');
-        }
-    });
-
-    ws.on('error', error => {
-        console.error('[WebSocket-Commands] Erro no WebSocket:', error);
-        if (ws.id) {
-            removeActiveConnection(ws.id);
-        }
-    });
-});
-
-// --- WebSocket de Áudio (mantido como está, pode ser removido se não for usar) ---
-wssAudio.on('connection', ws => {
-    console.log('[WebSocket-Audio] Cliente conectado.');
-    ws.on('message', message => {
-        console.log('[WebSocket-Audio] Recebida mensagem de áudio (tamanho):', message.length);
-        wssAudio.clients.forEach(client => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-                client.send(message);
-            }
-        });
-    });
-
-    ws.on('close', () => {
-        console.log('[WebSocket-Audio] Cliente desconectado.');
-    });
-
-    ws.on('error', error => {
-        console.error('[WebSocket-Audio] Erro no WebSocket de áudio:', error);
-    });
-});
-
-// --- Roteamento de Upgrade de WebSocket ---
-server.on('upgrade', (request, socket, head) => {
-    const pathname = url.parse(request.url).pathname;
-
-    if (pathname === '/ws-commands') {
-        wssCommands.handleUpgrade(request, socket, head, ws => {
-            wssCommands.emit('connection', ws, request);
-        });
-    } else if (pathname === '/ws-audio') {
-        wssAudio.handleUpgrade(request, socket, head, ws => {
-            wssAudio.emit('connection', ws, request);
-        });
-    } else {
-        socket.destroy();
+    try {
+        const data = await docClient.query(params).promise();
+        console.log(`[DynamoDB] Localizações para childId ${childId} solicitadas. Encontradas ${data.Items.length} localizações.`);
+        res.json(data.Items);
+    } catch (error) {
+        console.error('[DynamoDB_ERROR] Erro ao obter localizações:', error);
+        res.status(500).send('Erro ao obter localizações.');
     }
 });
 
-// --- Middleware para 404 (rota não encontrada) ---
+// Rota para receber notificações (SMS, Chamadas, etc.)
+app.post('/notifications', upload.none(), async (req, res) => {
+    console.log('[HTTP] Requisição POST para /notifications.');
+    const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber, recipientId, title, body } = req.body;
+
+    if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction || !recipientId || !title || !body) {
+        console.warn('[HTTP_ERROR] Dados de notificação incompletos.');
+        return res.status(400).send('Dados de notificação incompletos.');
+    }
+
+    const notificationId = uuidv4();
+
+    const params = {
+        TableName: DYNAMODB_TABLE_MESSAGES, // Usando a mesma tabela de mensagens para notificações
+        Item: {
+            conversationId: `notification_${childId}_${contactOrGroup}`, // Cria uma ID de conversa para notificações
+            messageId: notificationId,
+            childId: childId,
+            message: message,
+            messageType: messageType,
+            timestamp: timestamp,
+            contactOrGroup: contactOrGroup,
+            direction: direction,
+            phoneNumber: phoneNumber,
+            recipientId: recipientId,
+            title: title,
+            body: body
+        }
+    };
+
+    try {
+        await docClient.put(params).promise();
+        console.log(`[DynamoDB] Notificação tipo ${messageType} registrada para childId ${childId}.`);
+        res.status(201).send('Notificação registrada com sucesso!');
+    } catch (error) {
+        console.error('[DynamoDB_ERROR] Erro ao registrar notificação:', error);
+        res.status(500).send('Erro ao registrar notificação.');
+    }
+});
+
+// Middleware para 404 (rota não encontrada)
 app.use((req, res) => {
     console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
     res.status(404).send('Rota não encontrada');
@@ -400,8 +221,221 @@ app.use((err, req, res, next) => {
     res.status(500).send('Erro interno do servidor.');
 });
 
+// --- Configuração do Servidor HTTP e WebSocket ---
+const server = http.createServer(app); // Cria um servidor HTTP a partir da aplicação Express
+
+// Mapas para armazenar clientes WebSocket conectados
+const clients = new Map(); // Mapa geral de todos os WS conectados (key: ws instance, value: { type, id })
+const clientsByChildId = new Map(); // Mapa de clientes WS por childId
+const clientsByParentId = new Map(); // Mapa de clientes WS por parentId
+
+// Servidor WebSocket para comandos (GPS, Chat, etc.)
+const wss = new WebSocket.Server({ noServer: true });
+// Servidor WebSocket para áudio
+const wss_audio = new WebSocket.Server({ noServer: true });
+
+// Função auxiliar para enviar mensagem para um cliente específico
+function sendMessageToClient(ws, message) {
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+    } else {
+        console.warn(`[WS_SEND_WARN] Não foi possível enviar mensagem. WebSocket não está OPEN. State: ${ws.readyState}`);
+    }
+}
+
+// Manipulador de conexão WebSocket para comandos
+wss.on('connection', (ws, request, type) => {
+    console.log(`[WS_CONNECTION] Novo cliente WebSocket conectado para ${type}.`);
+    ws.on('message', (message) => {
+        const messageString = message.toString();
+        console.log(`[WS_MESSAGE] Mensagem recebida (${type}): ${messageString}`);
+        try {
+            const parsedMessage = JSON.parse(messageString);
+            const { type: msgType, childId, parentId, latitude, longitude, timestamp, message: chatMessage, notificationId, callType } = parsedMessage;
+
+            switch (msgType) {
+                case 'childConnect':
+                    console.log(`[WS_CHILD_CONNECT] Child ${childId} conectado.`);
+                    clients.set(ws, { type: 'child', id: childId });
+                    clientsByChildId.set(childId, ws);
+                    break;
+                case 'parentConnect':
+                    console.log(`[WS_PARENT_CONNECT] Parent ${parentId} conectado.`);
+                    clients.set(ws, { type: 'parent', id: parentId });
+                    clientsByParentId.set(parentId, ws);
+                    break;
+                case 'locationUpdate':
+                    console.log(`[WS_LOCATION_UPDATE] Localização do child ${childId}: Lat ${latitude}, Lng ${longitude}`);
+                    // Salvar no DynamoDB
+                    const locationParams = {
+                        TableName: DYNAMODB_TABLE_LOCATIONS,
+                        Item: {
+                            childId: childId,
+                            locationId: uuidv4(), // Gerar um ID único para cada localização
+                            latitude: latitude,
+                            longitude: longitude,
+                            timestamp: timestamp,
+                            receivedAt: new Date().toISOString()
+                        }
+                    };
+                    docClient.put(locationParams).promise()
+                        .then(() => console.log(`[DynamoDB] Localização do child ${childId} salva com sucesso.`))
+                        .catch(err => console.error('[DynamoDB_ERROR] Erro ao salvar localização:', err));
+
+                    // Enviar para os pais conectados
+                    clientsByParentId.forEach((parentWs, pId) => {
+                        console.log(`[WS_SEND] Enviando localização para o pai ${pId}.`);
+                        sendMessageToClient(parentWs, parsedMessage);
+                    });
+                    break;
+                case 'getLocation':
+                    console.log(`[WS_COMMAND] Comando 'getLocation' recebido para childId: ${childId}.`);
+                    const targetChildWs = clientsByChildId.get(childId);
+                    if (targetChildWs) {
+                        sendMessageToClient(targetChildWs, { type: 'getLocation' });
+                        console.log(`[WS_COMMAND] Comando 'getLocation' enviado para o filho ${childId}.`);
+                    } else {
+                        console.warn(`[WS_COMMAND_WARN] Filho ${childId} não encontrado online para enviar 'getLocation'.`);
+                    }
+                    break;
+                case 'chatMessage':
+                    console.log(`[WS_CHAT] Mensagem de chat: ${chatMessage} de ${parentId} para ${childId}`);
+                    // Salvar no DynamoDB (opcional, pode ser feito por outra rota HTTP)
+                    // Repassar para o destinatário (childId ou parentId)
+                    const targetWs = clients.get(ws)?.type === 'parent' ? clientsByChildId.get(childId) : clientsByParentId.get(parentId);
+                    if (targetWs) {
+                        sendMessageToClient(targetWs, parsedMessage);
+                        console.log(`[WS_CHAT] Mensagem de chat repassada.`);
+                    } else {
+                        console.warn(`[WS_CHAT_WARN] Destinatário ${childId || parentId} não encontrado online para chat.`);
+                    }
+                    break;
+                case 'notificationStatus':
+                    console.log(`[WS_NOTIFICATION] Status de notificação recebido para ${notificationId} do child ${childId}: ${parsedMessage.status}`);
+                    // Lógica para atualizar status de notificação, se necessário.
+                    break;
+                case 'startAudioStream':
+                    console.log(`[WS_AUDIO_COMMAND] Comando 'startAudioStream' recebido para childId: ${childId}.`);
+                    const audioTargetChildWs = clientsByChildId.get(childId);
+                    if (audioTargetChildWs) {
+                        sendMessageToClient(audioTargetChildWs, { type: 'startAudioStream' });
+                        console.log(`[WS_AUDIO_COMMAND] Comando 'startAudioStream' enviado para o filho ${childId}.`);
+                    } else {
+                        console.warn(`[WS_AUDIO_COMMAND_WARN] Filho ${childId} não encontrado online para iniciar streaming de áudio.`);
+                    }
+                    break;
+                case 'stopAudioStream':
+                    console.log(`[WS_AUDIO_COMMAND] Comando 'stopAudioStream' recebido para childId: ${childId}.`);
+                    const stopAudioTargetChildWs = clientsByChildId.get(childId);
+                    if (stopAudioTargetChildWs) {
+                        sendMessageToClient(stopAudioTargetChildWs, { type: 'stopAudioStream' });
+                        console.log(`[WS_AUDIO_COMMAND] Comando 'stopAudioStream' enviado para o filho ${childId}.`);
+                    } else {
+                        console.warn(`[WS_AUDIO_COMMAND_WARN] Filho ${childId} não encontrado online para parar streaming de áudio.`);
+                    }
+                    break;
+                case 'callInitiate':
+                    console.log(`[WS_CALL_INITIATE] Comando 'callInitiate' recebido para childId: ${childId}, callType: ${callType}.`);
+                    const callTargetChildWs = clientsByChildId.get(childId);
+                    if (callTargetChildWs) {
+                        sendMessageToClient(callTargetChildWs, { type: 'initiateCall', childId: childId, callType: callType });
+                        console.log(`[WS_CALL_INITIATE] Comando 'initiateCall' enviado para o filho ${childId}.`);
+                    } else {
+                        console.warn(`[WS_CALL_INITIATE_WARN] Filho ${childId} não encontrado online para iniciar chamada.`);
+                    }
+                    break;
+                case 'callStatus':
+                    console.log(`[WS_CALL_STATUS] Status de chamada recebido do child ${childId}: ${parsedMessage.status}.`);
+                    // Repassar status para o pai, se houver necessidade
+                    clientsByParentId.forEach((parentWs, pId) => {
+                        console.log(`[WS_SEND] Enviando status de chamada para o pai ${pId}.`);
+                        sendMessageToClient(parentWs, parsedMessage);
+                    });
+                    break;
+                default:
+                    console.warn(`[WS_UNKNOWN] Tipo de mensagem desconhecido recebido: ${msgType}`);
+            }
+        } catch (e) {
+            console.error('[WS_ERROR] Erro ao parsear ou processar mensagem WebSocket:', e.message, 'Mensagem original:', messageString);
+        }
+    });
+
+    ws.on('close', (code, reason) => {
+        console.log(`[WS_CLOSE] Cliente WebSocket desconectado (${type}). Code: ${code}, Reason: ${reason}`);
+        clients.delete(ws);
+        // Remover do mapa por childId ou parentId
+        for (let [key, value] of clientsByChildId.entries()) {
+            if (value === ws) {
+                clientsByChildId.delete(key);
+                console.log(`[WS_CLEANUP] Child ${key} removido dos clientes online.`);
+                break;
+            }
+        }
+        for (let [key, value] of clientsByParentId.entries()) {
+            if (value === ws) {
+                clientsByParentId.delete(key);
+                console.log(`[WS_CLEANUP] Parent ${key} removido dos clientes online.`);
+                break;
+            }
+        }
+    });
+
+    ws.on('error', (error) => {
+        console.error(`[WS_ERROR] Erro no WebSocket (${type}):`, error.message);
+    });
+});
+
+// Manipulador de conexão WebSocket para áudio
+wss_audio.on('connection', (ws, request, type) => {
+    console.log(`[WS_AUDIO_CONNECTION] Novo cliente WebSocket de áudio conectado para ${type}.`);
+    ws.on('message', (message) => {
+        // As mensagens de áudio são buffers, não JSON
+        if (message instanceof Buffer) {
+            // console.log(`[WS_AUDIO_MESSAGE] Recebido ${message.length} bytes de áudio.`);
+            // Repassar o buffer de áudio para todos os pais conectados (ou para o pai específico que solicitou)
+            clientsByParentId.forEach((parentWs, pId) => {
+                if (parentWs.readyState === WebSocket.OPEN) {
+                    parentWs.send(message); // Envia o buffer diretamente
+                }
+            });
+        } else {
+            console.warn(`[WS_AUDIO_WARN] Mensagem de áudio recebida não é um buffer.`);
+        }
+    });
+
+    ws.on('close', (code, reason) => {
+        console.log(`[WS_AUDIO_CLOSE] Cliente WebSocket de áudio desconectado. Code: ${code}, Reason: ${reason}`);
+    });
+
+    ws.on('error', (error) => {
+        console.error('[WS_AUDIO_ERROR] Erro no WebSocket de áudio:', error.message);
+    });
+});
+
+// --- MANIPULADOR DE UPGRADE HTTP (CRÍTICO PARA WEBSOCKETS) ---
+// Este evento é disparado quando uma requisição HTTP tem cabeçalhos de "Upgrade"
+server.on('upgrade', (request, socket, head) => {
+    const pathname = url.parse(request.url).pathname;
+    console.log(`[HTTP_UPGRADE] Requisição de Upgrade recebida para pathname: ${pathname}`); // <<< LOG ADICIONADO AQUI
+
+    if (pathname === '/ws-commands') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            wss.emit('connection', ws, request, 'commands');
+            console.log(`[WS_UPGRADE_SUCCESS] Upgrade para /ws-commands processado com sucesso.`); // <<< LOG ADICIONADO
+        });
+    } else if (pathname === '/ws-audio') {
+        wss_audio.handleUpgrade(request, socket, head, (ws) => {
+            wss_audio.emit('connection', ws, request, 'audio');
+            console.log(`[WS_UPGRADE_SUCCESS] Upgrade para /ws-audio processado com sucesso.`); // <<< LOG ADICIONADO
+        });
+    } else {
+        console.warn(`[WS_UPGRADE_FAIL] Pathname '${pathname}' não é um endpoint WebSocket conhecido. Fechando socket.`); // <<< LOG ADICIONADO
+        socket.destroy(); // Fecha a conexão se a rota WS não for encontrada
+    }
+});
+
 // --- INICIO ---
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => { // AGORA USA 'server' AO INVÉS DE 'app'
     console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`);
     console.log(`WebSocket de comandos (GPS, Chat) em: ws://localhost:${PORT}/ws-commands`);
     console.log(`WebSocket de áudio em: ws://localhost:${PORT}/ws-audio`);
@@ -411,6 +445,6 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
-    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`);
+    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DODB_TABLE_LOCATIONS}`); // Correção do typo DODB_TABLE_LOCATIONS para DYNAMODB_TABLE_LOCATIONS
     console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
 });
