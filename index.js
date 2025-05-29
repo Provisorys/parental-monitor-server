@@ -198,14 +198,21 @@ wssCommands.on('connection', ws => {
     ws.on('message', async message => {
         let parsedMessage;
         try {
-            parsedMessage = JSON.parse(message);
+            const messageString = message.toString();
+            parsedMessage = JSON.parse(messageString);
+            console.log(`[WebSocket-Commands] Mensagem recebida: ${messageString}`); // Log completo da mensagem recebida
         } catch (e) {
             console.error('[WebSocket-Commands] Erro ao analisar mensagem JSON:', e);
             return;
         }
 
-        const { type, childId, parentId, childName, data } = parsedMessage;
+        const { type, parentId, childName, data } = parsedMessage;
+        // Tenta extrair childId do objeto principal ou do objeto 'data' aninhado
+        const childId = parsedMessage.childId || (data && data.childId);
 
+        console.log(`[WebSocket-Commands] Extracted - type: ${type}, parentId: ${parentId}, childId: ${childId}`); // Adicione este log para verificação
+
+        // Lógica de identificação de conexão (parentConnect, childConnect)
         if (type === 'childConnect' && childId && parentId && childName) {
             ws.id = childId;
             ws.type = 'child';
@@ -216,8 +223,8 @@ wssCommands.on('connection', ws => {
             const params = {
                 TableName: DYNAMODB_TABLE_CHILDREN,
                 Item: {
-                    childId: childId, // CORRIGIDO: Usando 'childId' como a chave primária
-                    childName: childName, // CORRIGIDO: Alterado 'name' para 'childName'
+                    childId: childId,
+                    childName: childName,
                     parentId: parentId,
                     lastConnected: new Date().toISOString(),
                     connected: true
@@ -230,18 +237,21 @@ wssCommands.on('connection', ws => {
                 console.error(`[DynamoDB_ERROR] Erro ao salvar dados do filho via WS no DynamoDB: ${err.message}`, err);
             }
 
-        } else if (type === 'parentConnect' && parentId && data && data.listeningToChildId) {
+        } else if (type === 'parentConnect' && parentId) { // Removido 'data && data.listeningToChildId' pois o pai pode se conectar sem ouvir um filho específico no momento.
             ws.id = parentId;
             ws.type = 'parent';
-            ws.listeningToChildId = data.listeningToChildId;
+            if (data && data.listeningToChildId) { // Verifica se listeningToChildId existe em 'data'
+                ws.listeningToChildId = data.listeningToChildId;
+            }
             addActiveConnection(parentId, 'parent', ws);
-            console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${ws.listeningToChildId}`);
+            console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${ws.listeningToChildId || 'nenhum'}`);
         } else {
-             if (!ws.id) {
+            if (!ws.id) {
                 console.warn(`[WebSocket-Commands] Mensagem recebida antes da identificação da conexão: ${JSON.stringify(parsedMessage)}`);
-             }
+            }
         }
 
+        // Lógica para processar comandos após a identificação
         switch (type) {
             case 'locationUpdate':
                 if (childId && data && data.latitude !== undefined && data.longitude !== undefined) {
@@ -283,16 +293,16 @@ wssCommands.on('connection', ws => {
                 }
                 break;
 
-            case 'parentConnect': 
-                console.log(`[WebSocket-Commands] Pai ${ws.id} reafirmou conexão, ouvindo filho: ${ws.listeningToChildId}`);
+            case 'parentConnect':
+                console.log(`[WebSocket-Commands] Pai ${ws.id} reafirmou conexão, ouvindo filho: ${ws.listeningToChildId || 'nenhum'}`);
                 break;
 
-            case 'childConnect': 
+            case 'childConnect':
                 console.log(`[WebSocket-Commands] Filho ${ws.id} reafirmou conexão (após registro inicial).`);
                 break;
-            
-            case 'requestLocation':
-                const requestedChildId = data.childId;
+
+            case 'requestLocation': // <<< ALTERADO: De 'getLocation' para 'requestLocation'
+                const requestedChildId = childId; // childId já foi extraído no início
                 const requestingParentId = ws.id;
 
                 if (requestedChildId && requestingParentId) {
@@ -302,11 +312,12 @@ wssCommands.on('connection', ws => {
 
                     if (childSocket && childSocket.type === 'child' && childSocket.readyState === WebSocket.OPEN) {
                         childSocket.send(JSON.stringify({
-                            type: 'getLocation',
-                            childId: requestedChildId, // Adicionei esta linha
+                            type: 'getLocation', // <<< A MENSAGEM ENVIADA AO FILHO É 'getLocation'
+                            childId: requestedChildId,
                             requestedBy: requestingParentId
                         }));
                         console.log(`[WebSocket-Commands] Mensagem 'getLocation' enviada para o filho ${requestedChildId}.`);
+                        // Enviar confirmação de volta para o pai
                         ws.send(JSON.stringify({
                             type: 'locationRequestStatus',
                             childId: requestedChildId,
@@ -315,6 +326,7 @@ wssCommands.on('connection', ws => {
                         }));
                     } else {
                         console.warn(`[WebSocket-Commands] Filho ${requestedChildId} não encontrado ou não online para responder à solicitação de localização.`);
+                        // Enviar erro de volta para o pai
                         ws.send(JSON.stringify({
                             type: 'locationRequestStatus',
                             childId: requestedChildId,
@@ -324,6 +336,11 @@ wssCommands.on('connection', ws => {
                     }
                 } else {
                     console.warn('[WebSocket-Commands] Mensagem requestLocation inválida: childId ou parentId ausente.');
+                    // Enviar erro para o cliente que enviou a mensagem inválida
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: 'Comando requestLocation inválido. childId e parentId são obrigatórios.'
+                    }));
                 }
                 break;
 
