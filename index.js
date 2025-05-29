@@ -76,7 +76,7 @@ app.post('/registerChild', upload.none(), async (req, res) => {
     }
 });
 
-// Rota para obter todos os filhos registrados - ROTA RESTAURADA
+// Rota para obter todos os filhos registrados
 app.get('/children', async (req, res) => {
     console.log('[HTTP] Requisição GET para /children.');
     const { parentId } = req.query;
