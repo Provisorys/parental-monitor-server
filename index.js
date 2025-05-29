@@ -445,6 +445,6 @@ server.listen(PORT, '0.0.0.0', () => { // AGORA USA 'server' AO INVÉS DE 'app'
     console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
     console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
     console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
-    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DODB_TABLE_LOCATIONS}`); // Correção do typo DODB_TABLE_LOCATIONS para DYNAMODB_TABLE_LOCATIONS
+    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`); // Correção do typo DODB_TABLE_LOCATIONS para DYNAMODB_TABLE_LOCATIONS
     console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
 });
