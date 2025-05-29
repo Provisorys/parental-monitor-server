@@ -77,8 +77,8 @@ app.post('/registerChild', upload.none(), async (req, res) => {
 });
 
 // Rota para obter todos os filhos registrados - GARANTIDA QUE ESTÁ AQUI
-app.get('/children', async (req, res) => {
-    console.log('[HTTP] Requisição GET para /children.');
+app.get('/get-registered-children', async (req, res) => {
+    console.log('[HTTP] Requisição GET para /get-registered-children.');
     const { parentId } = req.query;
 
     if (!parentId) {
