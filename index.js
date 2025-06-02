@@ -249,20 +249,39 @@ wssCommands.on('connection', ws => {
     console.log(`[WebSocket-Commands] Novo cliente conectado. Total de entradas: ${activeConnections.size}`);
 
     ws.on('message', async message => {
+        let parsedMessage;
         try {
-            // Garante que a mensagem é uma string antes de tentar o JSON.parse
-            const messageString = message.toString();
-            const parsedMessage = JSON.parse(messageString);
+            console.log(`[WebSocket-Commands] Tipo da variável 'message' recebida (ANTES do parse): ${typeof message}`);
+            console.log(`[WebSocket-Commands] message é Buffer? ${Buffer.isBuffer(message)}`);
 
-            console.log('[WebSocket-Commands] Mensagem JSON recebida (APÓS PARSE):', parsedMessage);
-            console.log(`[WebSocket-Commands] Tipo da variável 'message' recebida: ${typeof message}`);
+            if (typeof message === 'string') {
+                // Se é uma string, parseia-a
+                parsedMessage = JSON.parse(message);
+            } else if (Buffer.isBuffer(message)) {
+                // Se é um buffer, converte para string e depois parseia
+                parsedMessage = JSON.parse(message.toString('utf8')); // Especifica UTF-8 para robustez
+            } else if (typeof message === 'object' && message !== null) {
+                // ESTE É O CASO INCOMUM RELATADO NOS LOGS: se 'message' já é um objeto
+                // Assume que já é um objeto JSON parseado e o usa diretamente.
+                parsedMessage = message;
+                console.warn('[WebSocket-Commands] Mensagem recebida já é um objeto. Pulando JSON.parse.');
+            } else {
+                console.error('[WebSocket-Commands] Tipo de mensagem inesperado ou inválido:', typeof message, 'Mensagem original:', message);
+                ws.send(JSON.stringify({ type: 'error', message: 'Mensagem inválida recebida.' }));
+                return;
+            }
 
+            // Após a lógica de parsing, garante que parsedMessage é válido
+            if (!parsedMessage || typeof parsedMessage !== 'object' || Array.isArray(parsedMessage)) {
+                console.error('[WebSocket-Commands] parsedMessage inválido ou não é um objeto JSON esperado:', parsedMessage);
+                ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido.' }));
+                return;
+            }
 
-            // Desestrutura os campos diretamente da parsedMessage
-            // childId e childName podem estar no nível superior ou dentro do objeto 'data'
+            console.log('[WebSocket-Commands] Mensagem JSON recebida (APÓS LÓGICA DE PARSE):', parsedMessage);
+
             const { type, parentId, childId, childName, data } = parsedMessage;
 
-            // Logs para depuração da desestruturação
             console.log(`[WebSocket-Commands] Desestruturado - type: ${type}, parentId: ${parentId}, childId (top-level): ${childId}, childName (top-level): ${childName}`);
             if (data) {
                 console.log(`[WebSocket-Commands] Conteúdo de 'data':`, data);
@@ -452,8 +471,10 @@ wssCommands.on('connection', ws => {
                     console.warn('[WebSocket-Commands] Tipo de mensagem desconhecido:', type);
             }
         } catch (error) {
-            console.error('[WebSocket-Commands] Erro ao processar mensagem JSON:', error, 'Mensagem original (toString):', message.toString());
-            console.error('[WebSocket-Commands] Tipo de mensagem recebida (original):', typeof message);
+            console.error('[WebSocket-Commands] Erro crítico ao processar mensagem (JSON.parse ou outro):', error);
+            console.error('[WebSocket-Commands] Mensagem original (tentativa toString):', message ? message.toString() : message);
+            console.error('[WebSocket-Commands] Tipo de mensagem recebida (no catch):', typeof message);
+            ws.send(JSON.stringify({ type: 'error', message: 'Erro interno ao processar sua mensagem.' }));
         }
     });
 
@@ -507,49 +528,73 @@ wssAudio.on('connection', ws => {
     console.log('[WebSocket-Audio] Novo cliente conectado.');
 
     ws.on('message', message => {
-        // Tenta parsear a mensagem como JSON para identificação
-        try {
-            const parsedMessage = JSON.parse(message.toString()); // Garante que é string
-            // console.log('[WebSocket-Audio] Mensagem JSON recebida:', parsedMessage); // Descomente para depurar JSON no WS de áudio
+        let parsedMessage = null;
+        let isControlMessage = false;
 
-            if (parsedMessage.type === 'childAudioConnect') {
+        try {
+            console.log(`[WebSocket-Audio] Tipo da variável 'message' recebida (ANTES do parse): ${typeof message}`);
+            console.log(`[WebSocket-Audio] message é Buffer? ${Buffer.isBuffer(message)}`);
+
+            if (typeof message === 'string') {
+                parsedMessage = JSON.parse(message);
+                isControlMessage = true;
+            } else if (Buffer.isBuffer(message) && message.length > 0) {
+                // Tenta parsear como JSON para mensagens de controle
+                try {
+                    parsedMessage = JSON.parse(message.toString('utf8'));
+                    isControlMessage = true;
+                } catch (e) {
+                    // Não é uma string JSON válida, trata como dados de áudio binários
+                    isControlMessage = false;
+                }
+            } else if (typeof message === 'object' && message !== null) {
+                parsedMessage = message;
+                isControlMessage = true;
+                console.warn('[WebSocket-Audio] Mensagem recebida já é um objeto. Pulando JSON.parse.');
+            } else {
+                console.error('[WebSocket-Audio] Tipo de mensagem inesperado ou inválido para áudio:', typeof message, 'Mensagem original:', message);
+                return;
+            }
+
+            if (isControlMessage && parsedMessage && typeof parsedMessage === 'object' && parsedMessage.type === 'childAudioConnect') {
                 identifiedChildId = parsedMessage.childId;
-                // Opcional: Você pode querer verificar o parentId aqui também
-                // identifiedParentId = parsedMessage.parentId; // Se você enviar o parentId na mensagem childAudioConnect
+                identifiedParentId = parsedMessage.parentId; // Se parentId é enviado aqui
                 activeAudioClients.set(ws, { childId: identifiedChildId, parentId: identifiedParentId, isParentAudioClient: false });
                 console.log(`[WebSocket-Audio] Cliente de áudio identificado: Child ID: ${identifiedChildId}`);
-                return; // Importante: não processe como áudio se for uma mensagem de identificação
+                return; // Importante: não processar como dados de áudio se for uma mensagem de identificação
             }
         } catch (e) {
-            // Se não for JSON, ou for JSON mas não for childAudioConnect, continue para processar como áudio
-            // console.log('[WebSocket-Audio] Mensagem não é JSON ou não é identificação, tratando como áudio.');
+            console.warn('[WebSocket-Audio] Erro ao tentar parsear mensagem como JSON para identificação:', e.message);
+            // Se o parsing falhar, é provável que sejam dados de áudio binários, então continua para o tratamento de áudio
+            isControlMessage = false;
         }
 
-        // Se a mensagem não é JSON de identificação, ela DEVE ser binária (dados de áudio)
-        if (Buffer.isBuffer(message)) {
+        // Se não for uma mensagem de controle, ou o parsing da mensagem de controle falhou, trata como dados de áudio binários
+        if (!isControlMessage && Buffer.isBuffer(message) && message.length > 0) {
             if (identifiedChildId) {
-                console.log(`[WebSocket-Audio] Áudio recebido de child ID: ${identifiedChildId}. Encaminhando...`);
+                console.log(`[WebSocket-Audio] Áudio recebido de child ID: ${identifiedChildId}. Encaminhando... Tamanho: ${message.length} bytes`);
 
+                // Encaminhar para todos os pais conectados no canal de COMANDOS
+                // A interface do pai precisa estar esperando 'audioData' do canal de COMANDOS
                 parentToWebSocket.forEach((parentWs, pId) => {
                     if (parentWs.readyState === WebSocket.OPEN) {
                         try {
+                            // Envia os dados de áudio como base64 via JSON
                             parentWs.send(JSON.stringify({
                                 type: 'audioData',
                                 childId: identifiedChildId,
-                                data: message.toString('base64') // Codifica o buffer em base64 para enviar como JSON
+                                data: message.toString('base64')
                             }));
                         } catch (jsonError) {
                             console.error(`[WebSocket-Audio] Erro ao enviar áudio codificado para pai ${pId}:`, jsonError);
                         }
                     }
                 });
-
-
             } else {
-                console.warn('[WebSocket-Audio] Mensagem de áudio recebida de cliente não identificado ou não-filho no WS de áudio.');
+                console.warn('[WebSocket-Audio] Mensagem de áudio binária recebida de cliente não identificado ou não-filho no WS de áudio.');
             }
-        } else {
-            console.warn('[WebSocket-Audio] Mensagem não binária e não identificação JSON:', message.toString());
+        } else if (!isControlMessage) { // Loga outras mensagens não-controle e não-binárias
+            console.warn('[WebSocket-Audio] Mensagem não binária e não identificação JSON, ignorando:', message.toString());
         }
     });
 
