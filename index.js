@@ -250,17 +250,25 @@ wssCommands.on('connection', ws => {
 
     ws.on('message', async message => {
         try {
-            const parsedMessage = JSON.parse(message);
-            console.log('[WebSocket-Commands] Mensagem JSON recebida:', parsedMessage);
+            // Garante que a mensagem é uma string antes de tentar o JSON.parse
+            const messageString = message.toString();
+            const parsedMessage = JSON.parse(messageString);
+
+            console.log('[WebSocket-Commands] Mensagem JSON recebida (APÓS PARSE):', parsedMessage);
+            console.log(`[WebSocket-Commands] Tipo da variável 'message' recebida: ${typeof message}`);
+
 
             // Desestrutura os campos diretamente da parsedMessage
             // childId e childName podem estar no nível superior ou dentro do objeto 'data'
             const { type, parentId, childId, childName, data } = parsedMessage;
 
-            // Log de extração consistente
-            console.log(`[WebSocket-Commands] Extracted - type: ${type}, parentId: ${parentId}, childId (top-level): ${childId}, childName (top-level): ${childName}`);
-            if (data && data.childId) {
-                console.log(`[WebSocket-Commands] Extracted from data - childId: ${data.childId}, childName: ${data.childName}`);
+            // Logs para depuração da desestruturação
+            console.log(`[WebSocket-Commands] Desestruturado - type: ${type}, parentId: ${parentId}, childId (top-level): ${childId}, childName (top-level): ${childName}`);
+            if (data) {
+                console.log(`[WebSocket-Commands] Conteúdo de 'data':`, data);
+                if (data.childId) {
+                    console.log(`[WebSocket-Commands] Extracted from data - childId: ${data.childId}, childName: ${data.childName}`);
+                }
             }
 
 
@@ -444,7 +452,8 @@ wssCommands.on('connection', ws => {
                     console.warn('[WebSocket-Commands] Tipo de mensagem desconhecido:', type);
             }
         } catch (error) {
-            console.error('[WebSocket-Commands] Erro ao processar mensagem JSON:', error, 'Mensagem original:', message.toString());
+            console.error('[WebSocket-Commands] Erro ao processar mensagem JSON:', error, 'Mensagem original (toString):', message.toString());
+            console.error('[WebSocket-Commands] Tipo de mensagem recebida (original):', typeof message);
         }
     });
 
@@ -500,7 +509,7 @@ wssAudio.on('connection', ws => {
     ws.on('message', message => {
         // Tenta parsear a mensagem como JSON para identificação
         try {
-            const parsedMessage = JSON.parse(message);
+            const parsedMessage = JSON.parse(message.toString()); // Garante que é string
             // console.log('[WebSocket-Audio] Mensagem JSON recebida:', parsedMessage); // Descomente para depurar JSON no WS de áudio
 
             if (parsedMessage.type === 'childAudioConnect') {
