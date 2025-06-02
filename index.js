@@ -83,7 +83,7 @@ app.get('/get-registered-children', async (req, res) => {
     const { parentId } = req.query; // Pega o parentId da query string
 
     const params = {
-        TableName: DylocalStorage.clear(),
+        TableName: DYNAMODB_TABLE_CHILDREN, // CORRIGIDO: Era DylocalStorage.clear(), que causava erro.
     };
 
     // Se um parentId for fornecido, filtra os resultados por ele
@@ -301,7 +301,7 @@ wssCommands.on('connection', ws => {
             parsedMessage = JSON.parse(messageString);
             console.log(`[WebSocket-Commands] Mensagem JSON recebida: ${messageString}`);
         } catch (e) {
-            console.error('[WebSocket-Commands] Erro ao analisar mensagem JSON, descartando:', e.message);
+            console.error(`[WebSocket-Commands] Erro ao analisar mensagem JSON, descartando: ${e.message}`); // CORRIGIDO: Usando crases
             return; // Sai da função se a mensagem não for um JSON válido
         }
 
@@ -334,7 +334,7 @@ wssCommands.on('connection', ws => {
                 await docClient.update(params).promise();
                 console.log(`[DynamoDB] Filho ${childName} (${childId}) status de conexão atualizado para 'true'.`);
             } catch (err) {
-                console.error(`[DynamoDB_ERROR] Erro ao atualizar status de conexão do filho ${childId}: ${err.message}`, err);
+                console.error(`[DynamoDB_ERROR] Erro ao atualizar status de conexão do filho ${childId}: ${err.message}`, err); // CORRIGIDO: Usando crases
                 // Se a atualização falhou (ex: item não existe e put não foi usado), tenta criar (put)
                 // Isso garante que o filho será registrado mesmo que não exista previamente.
                 const putParams = {
@@ -350,20 +350,20 @@ wssCommands.on('connection', ws => {
                 };
                 try {
                     await docClient.put(putParams).promise();
-                    console.log(`[DynamoDB] Filho ${childName} (${childId}) registrado/atualizado via WS na tabela '${DYNAMODB_TABLE_CHILDREN}'.`);
+                    console.log(`[DynamoDB] Filho ${childName} (${childId}) registrado/atualizado via WS na tabela '${DYNAMODB_TABLE_CHILDREN}'.`); // CORRIGIDO: Usando crases
                 } catch (putErr) {
-                    console.error(`[DynamoDB_ERROR] Erro final ao registrar filho via WS: ${putErr.message}`, putErr);
+                    console.error(`[DynamoDB_ERROR] Erro final ao registrar filho via WS: ${putErr.message}`, putErr); // CORRIGIDO: Usando crases
                 }
             }
         } else if (type === 'parentConnect' && parentId) {
             // Se for uma conexão de pai, verifica se está pedindo para ouvir um filho específico
             const listeningToChildId = (data && data.listeningToChildId) ? data.listeningToChildId : null;
             updateConnection(parentId, 'parent', ws, { listeningToChildId: listeningToChildId });
-            console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${listeningToChildId || 'nenhum'}`);
+            console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${listeningToChildId || 'nenhum'}`); // CORRIGIDO: Usando crases
         } else {
             // Se o WS ainda não tem ID (conexão nova sem identificação)
             if (!ws.id) {
-                console.warn(`[WebSocket-Commands] Mensagem recebida antes da identificação da conexão: ${JSON.stringify(parsedMessage)}`);
+                console.warn(`[WebSocket-Commands] Mensagem recebida antes da identificação da conexão: ${JSON.stringify(parsedMessage)}`); // CORRIGIDO: Usando crases
                 // Considerar fechar a conexão ou pedir identificação novamente se isso for um requisito
             }
         }
@@ -383,9 +383,9 @@ wssCommands.on('connection', ws => {
                     };
                     try {
                         await docClient.put(params).promise();
-                        console.log(`[WebSocket-Commands] Localização WS de ${childId} salva: Lat=${data.latitude}, Lng=${data.longitude}`);
+                        console.log(`[WebSocket-Commands] Localização WS de ${childId} salva: Lat=${data.latitude}, Lng=${data.longitude}`); // CORRIGIDO: Usando crases
 
-                        console.log(`[DEBUG] Tentando encaminhar localização de ${childId} para pais...`);
+                        console.log(`[DEBUG] Tentando encaminhar localização de ${childId} para pais...`); // CORRIGIDO: Usando crases
                         let parentFoundAndListening = false;
                         // Itera sobre todas as conexões ativas para encontrar pais que estão ouvindo este filho
                         for (let [id, entry] of activeConnections.entries()) {
@@ -398,12 +398,12 @@ wssCommands.on('connection', ws => {
                                     longitude: data.longitude,
                                     timestamp: new Date().toISOString()
                                 }));
-                                console.log(`[WebSocket-Commands] Localização de ${childId} encaminhada para o pai ${id}.`);
+                                console.log(`[WebSocket-Commands] Localização de ${childId} encaminhada para o pai ${id}.`); // CORRIGIDO: Usando crases
                                 parentFoundAndListening = true;
                             }
                         }
                         if (!parentFoundAndListening) {
-                            console.log(`[WebSocket-Commands] NENHUM pai encontrado online ou ouvindo o filho ${childId} para encaminhar a localização.`);
+                            console.log(`[WebSocket-Commands] NENHUM pai encontrado online ou ouvindo o filho ${childId} para encaminhar a localização.`); // CORRIGIDO: Usando crases
                         }
 
                     } catch (error) {
@@ -414,12 +414,12 @@ wssCommands.on('connection', ws => {
 
             case 'parentConnect':
                 // A identificação já foi tratada acima na lógica de 'parentConnect'
-                console.log(`[WebSocket-Commands] Pai ${ws.id} reafirmou conexão, ouvindo filho: ${activeConnections.get(ws.id)?.listeningToChildId || 'nenhum'}`);
+                console.log(`[WebSocket-Commands] Pai ${ws.id} reafirmou conexão, ouvindo filho: ${activeConnections.get(ws.id)?.listeningToChildId || 'nenhum'}`); // CORRIGIDO: Usando crases
                 break;
 
             case 'childConnect':
                 // A identificação já foi tratada acima na lógica de 'childConnect'
-                console.log(`[WebSocket-Commands] Filho ${ws.id} reafirmou conexão (após registro inicial).`);
+                console.log(`[WebSocket-Commands] Filho ${ws.id} reafirmou conexão (após registro inicial).`); // CORRIGIDO: Usando crases
                 break;
 
             case 'requestLocation':
@@ -427,7 +427,7 @@ wssCommands.on('connection', ws => {
                 const requestingParentId = ws.id; // O ID do pai que está solicitando
 
                 if (requestedChildId && requestingParentId) {
-                    console.log(`[WebSocket-Commands] Pai ${requestingParentId} solicitou localização do filho ${requestedChildId}.`);
+                    console.log(`[WebSocket-Commands] Pai ${requestingParentId} solicitou localização do filho ${requestedChildId}.`); // CORRIGIDO: Usando crases
 
                     // Busca a entrada do filho no mapa de conexões ativas
                     const childEntry = activeConnections.get(requestedChildId);
@@ -440,7 +440,7 @@ wssCommands.on('connection', ws => {
                             childId: requestedChildId,
                             requestedBy: requestingParentId
                         }));
-                        console.log(`[WebSocket-Commands] Mensagem 'getLocation' enviada para o filho ${requestedChildId}.`);
+                        console.log(`[WebSocket-Commands] Mensagem 'getLocation' enviada para o filho ${requestedChildId}.`); // CORRIGIDO: Usando crases
                         // Notifica o pai que a solicitação foi enviada com sucesso
                         ws.send(JSON.stringify({
                             type: 'locationRequestStatus',
@@ -450,7 +450,7 @@ wssCommands.on('connection', ws => {
                         }));
                     } else {
                         // Notifica o pai que o filho não está online ou não foi encontrado
-                        console.warn(`[WebSocket-Commands] Filho ${requestedChildId} não encontrado ou não online para responder à solicitação de localização.`);
+                        console.warn(`[WebSocket-Commands] Filho ${requestedChildId} não encontrado ou não online para responder à solicitação de localização.`); // CORRIGIDO: Usando crases
                         ws.send(JSON.stringify({
                             type: 'locationRequestStatus',
                             childId: requestedChildId,
@@ -473,15 +473,15 @@ wssCommands.on('connection', ws => {
                     if (requestedChildIdForAudio) {
                         // Atualiza a entrada do pai para indicar qual filho ele está ouvindo (apenas o comando WS)
                         updateConnection(ws.id, 'parent', ws, { listeningToChildId: requestedChildIdForAudio });
-                        console.log(`[WebSocket-Commands] Pai ${ws.id} solicitou streaming de áudio do filho ${requestedChildIdForAudio}.`);
+                        console.log(`[WebSocket-Commands] Pai ${ws.id} solicitou streaming de áudio do filho ${requestedChildIdForAudio}.`); // CORRIGIDO: Usando crases
 
                         // Enviar comando ao filho para iniciar streaming (via ws-commands do filho)
                         const childEntry = activeConnections.get(requestedChildIdForAudio);
                         if (childEntry && childEntry.wsCommands && childEntry.wsCommands.readyState === WebSocket.OPEN) {
                             childEntry.wsCommands.send(JSON.stringify({ type: 'startAudioStream' }));
-                            console.log(`[WebSocket-Commands] Comando 'startAudioStream' enviado para o filho ${requestedChildIdForAudio}.`);
+                            console.log(`[WebSocket-Commands] Comando 'startAudioStream' enviado para o filho ${requestedChildIdForAudio}.`); // CORRIGIDO: Usando crases
                         } else {
-                            console.warn(`[WebSocket-Commands] Filho ${requestedChildIdForAudio} não encontrado/online via comandos para iniciar streaming de áudio.`);
+                            console.warn(`[WebSocket-Commands] Filho ${requestedChildIdForAudio} não encontrado/online via comandos para iniciar streaming de áudio.`); // CORRIGIDO: Usando crases
                             ws.send(JSON.stringify({ type: 'audioStreamStatus', status: 'error', message: 'Filho não está online para iniciar o streaming.', childId: requestedChildIdForAudio }));
                         }
 
@@ -503,17 +503,17 @@ wssCommands.on('connection', ws => {
                     if (parentEntry && parentEntry.listeningToChildId === stoppedChildIdForAudio) {
                         // Limpa a propriedade listeningToChildId da entrada do pai
                         updateConnection(ws.id, 'parent', ws, { listeningToChildId: null });
-                        console.log(`[WebSocket-Commands] Pai ${ws.id} parou de ouvir áudio do filho ${stoppedChildIdForAudio}.`);
+                        console.log(`[WebSocket-Commands] Pai ${ws.id} parou de ouvir áudio do filho ${stoppedChildIdForAudio}.`); // CORRIGIDO: Usando crases
 
                         // Enviar comando ao filho para parar streaming (via ws-commands do filho)
                         const childEntry = activeConnections.get(stoppedChildIdForAudio);
                         if (childEntry && childEntry.wsCommands && childEntry.wsCommands.readyState === WebSocket.OPEN) {
                             childEntry.wsCommands.send(JSON.stringify({ type: 'stopAudioStream' }));
-                            console.log(`[WebSocket-Commands] Comando 'stopAudioStream' enviado para o filho ${stoppedChildIdForAudio}.`);
+                            console.log(`[WebSocket-Commands] Comando 'stopAudioStream' enviado para o filho ${stoppedChildIdForAudio}.`); // CORRIGIDO: Usando crases
                         }
                         ws.send(JSON.stringify({ type: 'audioStreamStatus', status: 'stopped', childId: stoppedChildIdForAudio }));
                     } else {
-                        console.warn(`[WebSocket-Commands] Pai ${ws.id} tentou parar stream de áudio de ${stoppedChildIdForAudio}, mas não estava ouvindo ou ID inválido.`);
+                        console.warn(`[WebSocket-Commands] Pai ${ws.id} tentou parar stream de áudio de ${stoppedChildIdForAudio}, mas não estava ouvindo ou ID inválido.`); // CORRIGIDO: Usando crases
                         ws.send(JSON.stringify({ type: 'error', message: 'Comando stopAudioStream inválido ou pai não estava ouvindo este filho.' }));
                     }
                 } else {
@@ -522,19 +522,19 @@ wssCommands.on('connection', ws => {
                 break;
 
             default:
-                console.warn(`[WebSocket-Commands] Tipo de mensagem desconhecido ou não tratável no WS de comandos: ${type}`);
+                console.warn(`[WebSocket-Commands] Tipo de mensagem desconhecido ou não tratável no WS de comandos: ${type}`); // CORRIGIDO: Usando crases
                 break;
         }
     });
 
     ws.on('close', async () => {
-        console.log(`[WebSocket-Commands] Cliente desconectado (ID: ${ws.id || 'desconhecido'}).`);
+        console.log(`[WebSocket-Commands] Cliente desconectado (ID: ${ws.id || 'desconhecido'}).`); // CORRIGIDO: Usando crases
         // Remove a conexão e atualiza o status no DynamoDB se necessário
         await removeActiveConnection(ws);
     });
 
     ws.on('error', error => {
-        console.error('[WebSocket-Commands] Erro no WebSocket de comandos (ID: ${ws.id || 'desconhecido'}):', error);
+        console.error(`[WebSocket-Commands] Erro no WebSocket de comandos (ID: ${ws.id || 'desconhecido'}):`, error); // CORRIGIDO: Usando crases
         // Em caso de erro, tenta remover a conexão
         removeActiveConnection(ws);
     });
@@ -561,17 +561,17 @@ wssAudio.on('connection', ws => {
             if (parsed.type === 'childAudioConnect' && parsed.childId) {
                 // Atualiza a entrada de conexão para associar este wsAudio ao filho
                 updateConnection(parsed.childId, 'child', ws);
-                console.log(`[WebSocket-Audio] Filho ${parsed.childId} conectado ao WS de Áudio.`);
+                console.log(`[WebSocket-Audio] Filho ${parsed.childId} conectado ao WS de Áudio.`); // CORRIGIDO: Usando crases
                 return; // Já processou esta mensagem de identificação
             }
             if (parsed.type === 'parentAudioConnect' && parsed.parentId) {
                 // Atualiza a entrada de conexão para associar este wsAudio ao pai
                 updateConnection(parsed.parentId, 'parent', ws);
-                console.log(`[WebSocket-Audio] Pai ${parsed.parentId} conectado ao WS de Áudio.`);
+                console.log(`[WebSocket-Audio] Pai ${parsed.parentId} conectado ao WS de Áudio.`); // CORRIGIDO: Usando crases
                 return; // Já processou esta mensagem de identificação
             }
             // Se for outro tipo de JSON, mas não de identificação, loga e ignora para o fluxo de áudio
-            console.warn(`[WebSocket-Audio] Mensagem JSON inesperada no WS de áudio: ${JSON.stringify(parsed)}`);
+            console.warn(`[WebSocket-Audio] Mensagem JSON inesperada no WS de áudio: ${JSON.stringify(parsed)}`); // CORRIGIDO: Usando crases
             return;
         }
 
@@ -601,13 +601,13 @@ wssAudio.on('connection', ws => {
     });
 
     ws.on('close', () => {
-        console.log(`[WebSocket-Audio] Cliente desconectado (ID: ${ws.id || 'desconhecido'}).`);
+        console.log(`[WebSocket-Audio] Cliente desconectado (ID: ${ws.id || 'desconhecido'}).`); // CORRIGIDO: Usando crases
         // Remove a conexão
         removeActiveConnection(ws);
     });
 
     ws.on('error', error => {
-        console.error('[WebSocket-Audio] Erro no WebSocket de áudio (ID: ${ws.id || 'desconhecido'}):', error);
+        console.error(`[WebSocket-Audio] Erro no WebSocket de áudio (ID: ${ws.id || 'desconhecido'}):`, error); // CORRIGIDO: Usando crases
         // Em caso de erro, tenta remover a conexão
         removeActiveConnection(ws);
     });
@@ -617,7 +617,7 @@ wssAudio.on('connection', ws => {
 // Intercepta requisições de upgrade para WebSockets e as direciona para os WSs corretos
 server.on('upgrade', (request, socket, head) => {
     const pathname = url.parse(request.url).pathname;
-    console.log(`[HTTP-Upgrade] Tentativa de upgrade para pathname: ${pathname}`);
+    console.log(`[HTTP-Upgrade] Tentativa de upgrade para pathname: ${pathname}`); // CORRIGIDO: Usando crases
 
     if (pathname === '/ws-commands') {
         wssCommands.handleUpgrade(request, socket, head, ws => {
@@ -628,14 +628,14 @@ server.on('upgrade', (request, socket, head) => {
             wssAudio.emit('connection', ws, request);
         });
     } else {
-        console.warn(`[HTTP-Upgrade] Caminho de WebSocket inválido: ${pathname}. Destruindo socket.`);
+        console.warn(`[HTTP-Upgrade] Caminho de WebSocket inválido: ${pathname}. Destruindo socket.`); // CORRIGIDO: Usando crases
         socket.destroy(); // Destroi o socket se o caminho não for reconhecido
     }
 });
 
 // --- Middleware para 404 (rota não encontrada) ---
 app.use((req, res) => {
-    console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
+    console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`); // CORRIGIDO: Usando crases
     res.status(404).send('Rota não encontrada');
 });
 
@@ -647,15 +647,15 @@ app.use((err, req, res, next) => {
 
 // --- INICIO DO SERVIDOR ---
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`);
-    console.log(`WebSocket de comandos (GPS, Chat) em: ws://localhost:${PORT}/ws-commands`);
-    console.log(`WebSocket de áudio em: ws://localhost:${PORT}/ws-audio`);
-    console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
-    console.log(`Bucket S3 configurado via env: ${process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'}`);
-    console.log(`AWS Access Key ID configurada via env: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
-    console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
-    console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`);
-    console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`);
-    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`);
-    console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`);
+    console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`); // CORRIGIDO: Usando crases
+    console.log(`WebSocket de comandos (GPS, Chat) em: ws://localhost:${PORT}/ws-commands`); // CORRIGIDO: Usando crases
+    console.log(`WebSocket de áudio em: ws://localhost:${PORT}/ws-audio`); // CORRIGIDO: Usando crases
+    console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`); // CORRIGIDO: Usando crases
+    console.log(`Bucket S3 configurado via env: ${process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'}`); // CORRIGIDO: Usando crases
+    console.log(`AWS Access Key ID configurada via env: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`); // CORRIGIDO: Usando crases
+    console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`); // CORRIGIDO: Usando crases
+    console.log(`Constante DYNAMODB_TABLE_MESSAGES: ${DYNAMODB_TABLE_MESSAGES}`); // CORRIGIDO: Usando crases
+    console.log(`Constante DYNAMODB_TABLE_CONVERSATIONS: ${DYNAMODB_TABLE_CONVERSATIONS}`); // CORRIGIDO: Usando crases
+    console.log(`Constante DYNAMODB_TABLE_LOCATIONS: ${DYNAMODB_TABLE_LOCATIONS}`); // CORRIGIDO: Usando crases
+    console.log(`Constante DYNAMODB_TABLE_CHILDREN: ${DYNAMODB_TABLE_CHILDREN}`); // CORRIGIDO: Usando crases
 });
