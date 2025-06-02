@@ -394,17 +394,21 @@ wssCommands.on('connection', ws => {
 
                 case 'startAudioStream':
                     // Pai solicitando início de streaming de áudio de um filho específico
+                    console.log(`[Audio-Debug] Recebido 'startAudioStream' do pai ${currentParentId} para filho ${childId}. ClientType: ${clientType}`);
                     if (clientType !== 'parent' || !childId) { // Usa childId do payload
                         console.warn('[WebSocket-Commands] Requisição de áudio inválida: não é pai ou childId ausente.');
+                        ws.send(JSON.stringify({ type: 'error', message: 'Requisição de áudio inválida.' }));
                         return;
                     }
                     const targetChildWsAudio = childToWebSocket.get(childId); // Acha a conexão de COMANDO do filho
+                    console.log(`[Audio-Debug] Tentando encontrar WS do filho ${childId}. Encontrado: ${!!targetChildWsAudio}`); // `!!` converte para boolean
                     if (targetChildWsAudio && targetChildWsAudio.readyState === WebSocket.OPEN) {
                         targetChildWsAudio.send(JSON.stringify({ type: 'startAudioStream' }));
                         console.log(`[Audio] Comando 'startAudioStream' enviado para filho ${childId}.`);
+                        ws.send(JSON.stringify({ type: 'info', message: `Comando 'startAudioStream' enviado para ${childId}.` }));
                     } else {
                         console.warn(`[Audio] Filho ${childId} não encontrado ou offline para comando de áudio.`);
-                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${childId} offline.` }));
+                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${childId} offline ou conexão de comando não encontrada.` }));
                     }
                     break;
 
