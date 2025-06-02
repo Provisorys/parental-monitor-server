@@ -249,29 +249,50 @@ wssCommands.on('connection', ws => {
     console.log(`[WebSocket-Commands] Novo cliente conectado. Total de entradas: ${activeConnections.size}`);
 
     ws.on('message', async message => {
-        let rawParsedMessage; // Variável temporária para o resultado do parse
         let finalParsedMessage = null; // Variável para o objeto final a ser usado
         try {
             console.log(`[WebSocket-Commands] Tipo da variável 'message' recebida (ANTES do parse): ${typeof message}`);
             console.log(`[WebSocket-Commands] message é Buffer? ${Buffer.isBuffer(message)}`);
 
-            if (typeof message === 'string') {
-                rawParsedMessage = JSON.parse(message);
-            } else if (Buffer.isBuffer(message)) {
-                // Tenta parsear o Buffer como JSON string
-                rawParsedMessage = JSON.parse(message.toString('utf8'));
-            } else {
-                // Se não é string nem Buffer, mas é um objeto, assume que já é o JSON.
-                rawParsedMessage = message;
-                console.warn('[WebSocket-Commands] Mensagem recebida já é um objeto e não um Buffer/String. Usando diretamente.');
+            let currentMessageContent = message;
+            if (Buffer.isBuffer(currentMessageContent)) {
+                currentMessageContent = currentMessageContent.toString('utf8');
             }
 
-            // --- INÍCIO DA NOVA MUDANÇA PROPOSTA ---
-            // Atribui rawParsedMessage a finalParsedMessage imediatamente.
-            // As validações posteriores confirmarão se finalParsedMessage é um objeto válido.
-            finalParsedMessage = rawParsedMessage;
+            // Loop para tentar parsear a mensagem até que seja um objeto JSON válido
+            let parseAttempts = 0;
+            let parsedResult = null;
+            let successfullyParsedToObject = false;
+
+            while (parseAttempts < 5) { // Limita as tentativas de parse para evitar loops infinitos
+                try {
+                    parsedResult = JSON.parse(currentMessageContent);
+                    if (typeof parsedResult === 'object' && parsedResult !== null && !Array.isArray(parsedResult)) {
+                        successfullyParsedToObject = true;
+                        break; // Sucesso: parseado para um objeto
+                    } else {
+                        // Se não é um objeto (ex: uma string ou número), tenta parsear novamente
+                        // Isso lida com casos como JSON.parse('"{\"key\":\"value\"}"')
+                        currentMessageContent = parsedResult;
+                        parseAttempts++;
+                    }
+                } catch (e) {
+                    // Falha no parse, não é JSON válido ou não pode ser parseado mais
+                    break;
+                }
+            }
+            
+            if (successfullyParsedToObject) {
+                finalParsedMessage = parsedResult;
+            } else {
+                // Fallback: se após as tentativas ainda não for um objeto ou falhou no parse,
+                // define finalParsedMessage como o último resultado (pode ser string/número)
+                // ou null/undefined se nunca foi parseado com sucesso.
+                finalParsedMessage = parsedResult; 
+                console.error('[WebSocket-Commands] Falha ao parsear a mensagem para um objeto JSON após múltiplas tentativas:', currentMessageContent);
+            }
+
             console.log(`[WebSocket-Commands] Pulando cópia profunda devido a erro persistente; usando rawParsedMessage diretamente.`);
-            // --- FIM DA NOVA MUDANÇA PROPOSTA ---
 
             // --- NOVO LOGS DE DEPURACAO ---
             console.log(`[WebSocket-Commands] DEBUG - finalParsedMessage antes da validação:`, finalParsedMessage);
@@ -281,7 +302,7 @@ wssCommands.on('connection', ws => {
 
             // A validação agora checa diretamente finalParsedMessage, que já deve ter o objeto parseado/atribuído.
             if (!finalParsedMessage || typeof finalParsedMessage !== 'object' || Array.isArray(finalParsedMessage)) {
-                console.error('[WebSocket-Commands] parsedMessage inválido ou não é um objeto JSON esperado APÓS ATRIBUIÇÃO DIRETA:', rawParsedMessage); // Usando rawParsedMessage para contexto do erro
+                console.error('[WebSocket-Commands] parsedMessage inválido ou não é um objeto JSON esperado APÓS ATRIBUIÇÃO DIRETA:', finalParsedMessage); 
                 ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido ou corrompido.' }));
                 return;
             }
