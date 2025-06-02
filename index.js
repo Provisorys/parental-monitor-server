@@ -71,7 +71,7 @@ app.post('/register-child', async (req, res) => {
 });
 
 // Rota para listar filhos registrados
-app.get('/children', async (req, res) => {
+app.get('/get-registered-children', async (req, res) => {
     try {
         const params = {
             TableName: DYNAMODB_TABLE_CHILDREN
