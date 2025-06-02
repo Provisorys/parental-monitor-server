@@ -255,26 +255,29 @@ wssCommands.on('connection', ws => {
             console.log(`[WebSocket-Commands] Tipo da variável 'message' recebida (ANTES do parse): ${typeof message}`);
             console.log(`[WebSocket-Commands] message é Buffer? ${Buffer.isBuffer(message)}`);
 
+            // --- INÍCIO DA MUDANÇA PROPOSTA ---
             if (typeof message === 'string') {
                 rawParsedMessage = JSON.parse(message);
             } else if (Buffer.isBuffer(message)) {
-                rawParsedMessage = JSON.parse(message.toString('utf8')); // Especifica UTF-8 para robustez
-            } else if (typeof message === 'object' && message !== null) {
-                // ESTE É O CASO INCOMUM RELATADO NOS LOGS: se 'message' já é um objeto
-                // Assume que já é um objeto JSON parseado e o usa diretamente.
-                rawParsedMessage = message;
-                console.warn('[WebSocket-Commands] Mensagem recebida já é um objeto. Pulando JSON.parse.');
+                // Tenta parsear o Buffer como JSON string
+                rawParsedMessage = JSON.parse(message.toString('utf8'));
             } else {
-                console.error('[WebSocket-Commands] Tipo de mensagem inesperado ou inválido:', typeof message, 'Mensagem original:', message);
-                ws.send(JSON.stringify({ type: 'error', message: 'Mensagem inválida recebida.' }));
-                return;
+                // Se não é string nem Buffer, mas é um objeto, assume que já é o JSON.
+                // Esta é a parte que o log indicou ser 'object', então tratamos como tal.
+                // Não é mais necessário um JSON.parse aqui se já é um objeto JSON.
+                rawParsedMessage = message;
+                console.warn('[WebSocket-Commands] Mensagem recebida já é um objeto e não um Buffer/String. Usando diretamente.');
             }
 
             // Realiza uma cópia profunda (deep copy) para garantir que o objeto não seja mutado posteriormente
             // E valida o tipo imediatamente após o parse/atribuição
-            // A condição Array.isArray(rawParsedMessage) foi adicionada para garantir que não copiamos arrays inesperados como objetos.
             if (rawParsedMessage && typeof rawParsedMessage === 'object' && !Array.isArray(rawParsedMessage)) {
-                finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
+                try {
+                    finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
+                } catch (copyError) {
+                    console.error(`[WebSocket-Commands] Erro durante a cópia profunda de rawParsedMessage: ${copyError.message}`, rawParsedMessage);
+                    // Se a cópia profunda falhar, finalParsedMessage permanecerá null, o que será pego na próxima validação.
+                }
             }
 
             // --- NOVO LOGS DE DEPURACAO ---
@@ -300,7 +303,6 @@ wssCommands.on('connection', ws => {
                     console.log(`[WebSocket-Commands] Extracted from data - childId: ${data.childId}, childName: ${data.childName}`);
                 }
             }
-
 
             switch (type) {
                 case 'parentConnect':
@@ -355,7 +357,7 @@ wssCommands.on('connection', ws => {
 
                     // Salvar no DynamoDB
                     const locationParams = {
-                        TableName: DYNAMODB_TABLE_LOCATIONS,
+                        TableName: DYNAMODB_TABLE_TABLE_LOCATIONS,
                         Item: {
                             locationId: uuidv4(),
                             childId: currentChildId,
@@ -570,7 +572,12 @@ wssAudio.on('connection', ws => {
 
             // Validação e cópia profunda para mensagens de controle de áudio
             if (isControlMessage && rawParsedMessage && typeof rawParsedMessage === 'object' && !Array.isArray(rawParsedMessage)) {
-                finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
+                try { // Adicionado try/catch para a cópia profunda aqui também
+                    finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
+                } catch (copyError) {
+                    console.error(`[WebSocket-Audio] Erro durante a cópia profunda de rawParsedMessage (controle): ${copyError.message}`, rawParsedMessage);
+                    // Se a cópia profunda falhar, finalParsedMessage permanecerá null.
+                }
             }
 
             // --- NOVO LOGS DE DEPURACAO ---
