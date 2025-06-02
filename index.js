@@ -269,16 +269,13 @@ wssCommands.on('connection', ws => {
                 console.warn('[WebSocket-Commands] Mensagem recebida já é um objeto e não um Buffer/String. Usando diretamente.');
             }
 
-            // Realiza uma cópia profunda (deep copy) para garantir que o objeto não seja mutado posteriormente
-            // E valida o tipo imediatamente após o parse/atribuição
+            // Se rawParsedMessage é um objeto válido, usá-lo diretamente como finalParsedMessage.
+            // A cópia profunda com JSON.parse(JSON.stringify()) está falhando misteriosamente.
             if (rawParsedMessage && typeof rawParsedMessage === 'object' && !Array.isArray(rawParsedMessage)) {
-                try {
-                    finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
-                } catch (copyError) {
-                    console.error(`[WebSocket-Commands] Erro durante a cópia profunda de rawParsedMessage: ${copyError.message}`, rawParsedMessage);
-                    // Se a cópia profunda falhar, finalParsedMessage permanecerá null, o que será pego na próxima validação.
-                }
+                finalParsedMessage = rawParsedMessage;
+                console.warn('[WebSocket-Commands] Pulando cópia profunda devido a erro persistente; usando rawParsedMessage diretamente.');
             }
+            // --- FIM DA MUDANÇA PROPOSTA ---
 
             // --- NOVO LOGS DE DEPURACAO ---
             console.log(`[WebSocket-Commands] DEBUG - finalParsedMessage antes da validação:`, finalParsedMessage);
@@ -572,12 +569,9 @@ wssAudio.on('connection', ws => {
 
             // Validação e cópia profunda para mensagens de controle de áudio
             if (isControlMessage && rawParsedMessage && typeof rawParsedMessage === 'object' && !Array.isArray(rawParsedMessage)) {
-                try { // Adicionado try/catch para a cópia profunda aqui também
-                    finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
-                } catch (copyError) {
-                    console.error(`[WebSocket-Audio] Erro durante a cópia profunda de rawParsedMessage (controle): ${copyError.message}`, rawParsedMessage);
-                    // Se a cópia profunda falhar, finalParsedMessage permanecerá null.
-                }
+                // Pulando cópia profunda aqui também, para consistência com o canal de comandos
+                finalParsedMessage = rawParsedMessage;
+                console.warn('[WebSocket-Audio] Pulando cópia profunda de mensagem de controle; usando rawParsedMessage diretamente.');
             }
 
             // --- NOVO LOGS DE DEPURACAO ---
