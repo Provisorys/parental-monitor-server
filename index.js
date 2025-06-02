@@ -294,7 +294,7 @@ wssCommands.on('connection', ws => {
 
             console.log(`[WebSocket-Commands] Pulando cópia profunda devido a erro persistente; usando rawParsedMessage diretamente.`);
 
-            // --- NOVO LOGS DE DEPURACAO ---
+            // --- NOVOS LOGS DE DEPURACAO ---
             console.log(`[WebSocket-Commands] DEBUG - finalParsedMessage antes da validação:`, finalParsedMessage);
             console.log(`[WebSocket-Commands] DEBUG - typeof finalParsedMessage:`, typeof finalParsedMessage);
             console.log(`[WebSocket-Commands] DEBUG - !finalParsedMessage:`, !finalParsedMessage);
@@ -308,6 +308,9 @@ wssCommands.on('connection', ws => {
             }
 
             console.log('[WebSocket-Commands] Mensagem JSON recebida (APÓS LÓGICA DE PARSE E VALIDAÇÃO FINAL):', finalParsedMessage);
+
+            // NOVO LOG DE DEPURACAO AQUI
+            console.log(`[WebSocket-Commands] DEBUG (before switch) - currentParentId: ${currentParentId}, clientType: ${clientType}`);
 
             const { type, parentId, childId, childName, data } = finalParsedMessage; // Use finalParsedMessage
 
@@ -594,7 +597,7 @@ wssAudio.on('connection', ws => {
             // --- FIM DA NOVA MUDANÇA PROPOSTA NO WSS AUDIO ---
 
 
-            // --- NOVO LOGS DE DEPURACAO ---
+            // --- NOVOS LOGS DE DEPURACAO ---
             console.log(`[WebSocket-Audio] DEBUG - finalParsedMessage (controle) antes da validação:`, finalParsedMessage);
             console.log(`[WebSocket-Audio] DEBUG - typeof finalParsedMessage (controle):`, typeof finalParsedMessage);
             console.log(`[WebSocket-Audio] DEBUG - !finalParsedMessage (controle):`, !finalParsedMessage);
