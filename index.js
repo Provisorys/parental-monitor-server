@@ -272,7 +272,8 @@ wssCommands.on('connection', ws => {
             }
 
             // Após a lógica de parsing, garante que parsedMessage é válido
-            if (!parsedMessage || typeof parsedMessage !== 'object' || Array.isArray(parsedMessage)) {
+            // Corrigido: Removido '|| Array.isArray(parsedMessage)' pois objetos JSON válidos não são arrays.
+            if (!parsedMessage || typeof parsedMessage !== 'object') {
                 console.error('[WebSocket-Commands] parsedMessage inválido ou não é um objeto JSON esperado:', parsedMessage);
                 ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido.' }));
                 return;
