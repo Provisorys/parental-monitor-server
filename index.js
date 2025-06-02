@@ -277,8 +277,14 @@ wssCommands.on('connection', ws => {
                 finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
             }
 
+            // --- NOVO LOGS DE DEPURACAO ---
+            console.log(`[WebSocket-Commands] DEBUG - finalParsedMessage antes da validação:`, finalParsedMessage);
+            console.log(`[WebSocket-Commands] DEBUG - typeof finalParsedMessage:`, typeof finalParsedMessage);
+            console.log(`[WebSocket-Commands] DEBUG - !finalParsedMessage:`, !finalParsedMessage);
+            // --- FIM DOS NOVOS LOGS DE DEPURACAO ---
+
             if (!finalParsedMessage || typeof finalParsedMessage !== 'object') {
-                console.error('[WebSocket-Commands] parsedMessage inválido ou não é um objeto JSON esperado APÓS CÓPIA:', rawParsedMessage);
+                console.error('[WebSocket-Commands] parsedMessage inválido ou não é um objeto JSON esperado APÓS CÓPIA:', rawParsedMessage); // Mantém o rawParsedMessage para comparação
                 ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido ou corrompido.' }));
                 return;
             }
@@ -566,6 +572,12 @@ wssAudio.on('connection', ws => {
             if (isControlMessage && rawParsedMessage && typeof rawParsedMessage === 'object' && !Array.isArray(rawParsedMessage)) {
                 finalParsedMessage = JSON.parse(JSON.stringify(rawParsedMessage)); // Copia profunda
             }
+
+            // --- NOVO LOGS DE DEPURACAO ---
+            console.log(`[WebSocket-Audio] DEBUG - finalParsedMessage (controle) antes da validação:`, finalParsedMessage);
+            console.log(`[WebSocket-Audio] DEBUG - typeof finalParsedMessage (controle):`, typeof finalParsedMessage);
+            console.log(`[WebSocket-Audio] DEBUG - !finalParsedMessage (controle):`, !finalParsedMessage);
+            // --- FIM DOS NOVOS LOGS DE DEPURACAO ---
 
             if (isControlMessage && (!finalParsedMessage || typeof finalParsedMessage !== 'object')) {
                 console.error('[WebSocket-Audio] parsedMessage (controle) inválido ou não é um objeto JSON esperado APÓS CÓPIA:', rawParsedMessage);
