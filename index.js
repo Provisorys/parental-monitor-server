@@ -250,14 +250,19 @@ wssCommands.on('connection', ws => {
             const parsedMessage = JSON.parse(message);
             console.log('[WebSocket-Commands] Mensagem JSON recebida:', parsedMessage);
 
-            const { type, parentId: msgParentId, childId: msgChildId, childName, data } = parsedMessage;
+            // Desestrutura apenas o 'type' e 'data' do nível superior.
+            // parentId está no nível superior, mas também pode ser acessado diretamente.
+            const { type, data } = parsedMessage;
 
-            // Extrai dados da mensagem para facilitar o logging e uso
-            // Garante que childId e parentId sejam tratados corretamente
-            const extractedParentId = msgParentId || (data && Array.isArray(data) && data[0] === 'parentId' ? data[1] : undefined);
-            const extractedChildId = msgChildId || (data && Array.isArray(data) && data[0] === 'childId' ? data[1] : undefined);
+            // parentId está no nível superior
+            const parentId = parsedMessage.parentId;
 
-            console.log(`[WebSocket-Commands] Extracted - type: ${type}, parentId: ${extractedParentId}, childId: ${extractedChildId}`);
+            // childId e childName estão dentro do objeto 'data'
+            const childId = data && data.childId;
+            const childName = data && data.childName; // Adicionado para extrair childName
+
+            console.log(`[WebSocket-Commands] Extracted - type: ${type}, parentId: ${parentId}, childId: ${childId}, childName: ${childName}`);
+            // ^ Atualize esta linha para incluir childName no log de extração
 
             switch (type) {
                 case 'parentConnect':
@@ -266,11 +271,11 @@ wssCommands.on('connection', ws => {
                     parentToWebSocket.set(parentId, ws);
                     activeConnections.set(parentId, ws); // Atualiza activeConnections com o parentId real
                     console.log(`[WebSocket-Manager] Conexão parent ${parentId} atualizada. Total de entradas: ${activeConnections.size}`);
-                    console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${extractedChildId || 'nenhum'}`);
+                    console.log(`[WebSocket-Commands] Pai conectado e identificado: ID: ${parentId}, ouvindo filho: ${childId || 'nenhum'}`);
                     break;
                 case 'childConnect':
-                    childId = extractedChildId; // Define o childId para esta conexão
-                    parentId = extractedParentId; // Garante que o parentId também seja definido para o filho
+                    childId = childId; // Define o childId para esta conexão
+                    parentId = parentId; // Garante que o parentId também seja definido para o filho
                     clientType = 'child';
                     childToWebSocket.set(childId, ws);
                     activeConnections.set(childId, ws); // Atualiza activeConnections com o childId real
@@ -338,7 +343,7 @@ wssCommands.on('connection', ws => {
                 case 'chatMessage':
                     // childId ou parentId deve estar definido
                     const senderId = clientType === 'child' ? childId : parentId;
-                    const receiverId = clientType === 'child' ? parentId : msgChildId; // Se for filho, receptor é o pai. Se for pai, receptor é o filho (msgChildId)
+                    const receiverId = clientType === 'child' ? parentId : data.childId; // Se for filho, receptor é o pai. Se for pai, receptor é o filho (data.childId)
                     const senderName = clientType === 'child' ? childName : 'Pai'; // Nome do remetente
                     const receiverWs = clientType === 'child' ? parentToWebSocket.get(receiverId) : childToWebSocket.get(receiverId);
 
@@ -377,49 +382,49 @@ wssCommands.on('connection', ws => {
 
                 case 'requestLocation':
                     // Pai solicitando localização de um filho específico
-                    if (clientType !== 'parent' || !extractedChildId) {
+                    if (clientType !== 'parent' || !childId) { // Use childId do parsedMessage.data
                         console.warn('[WebSocket-Commands] Requisição de localização inválida: não é pai ou childId ausente.');
                         return;
                     }
-                    const targetChildWs = childToWebSocket.get(extractedChildId);
+                    const targetChildWs = childToWebSocket.get(childId);
                     if (targetChildWs && targetChildWs.readyState === WebSocket.OPEN) {
                         targetChildWs.send(JSON.stringify({ type: 'requestLocation' }));
-                        console.log(`[Location] Requisição de localização enviada para filho ${extractedChildId}.`);
+                        console.log(`[Location] Requisição de localização enviada para filho ${childId}.`);
                     } else {
-                        console.warn(`[Location] Filho ${extractedChildId} não encontrado ou offline para requisição de localização.`);
-                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${extractedChildId} offline.` }));
+                        console.warn(`[Location] Filho ${childId} não encontrado ou offline para requisição de localização.`);
+                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${childId} offline.` }));
                     }
                     break;
 
                 case 'startAudioStream':
                     // Pai solicitando início de streaming de áudio de um filho específico
-                    if (clientType !== 'parent' || !extractedChildId) {
+                    if (clientType !== 'parent' || !childId) { // Use childId do parsedMessage.data
                         console.warn('[WebSocket-Commands] Requisição de áudio inválida: não é pai ou childId ausente.');
                         return;
                     }
-                    const targetChildWsAudio = childToWebSocket.get(extractedChildId); // Acha a conexão de COMANDO do filho
+                    const targetChildWsAudio = childToWebSocket.get(childId); // Acha a conexão de COMANDO do filho
                     if (targetChildWsAudio && targetChildWsAudio.readyState === WebSocket.OPEN) {
                         targetChildWsAudio.send(JSON.stringify({ type: 'startAudioStream' }));
-                        console.log(`[Audio] Comando 'startAudioStream' enviado para filho ${extractedChildId}.`);
+                        console.log(`[Audio] Comando 'startAudioStream' enviado para filho ${childId}.`);
                     } else {
-                        console.warn(`[Audio] Filho ${extractedChildId} não encontrado ou offline para comando de áudio.`);
-                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${extractedChildId} offline.` }));
+                        console.warn(`[Audio] Filho ${childId} não encontrado ou offline para comando de áudio.`);
+                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${childId} offline.` }));
                     }
                     break;
 
                 case 'stopAudioStream':
                     // Pai solicitando parada de streaming de áudio de um filho específico
-                    if (clientType !== 'parent' || !extractedChildId) {
+                    if (clientType !== 'parent' || !childId) { // Use childId do parsedMessage.data
                         console.warn('[WebSocket-Commands] Requisição de parada de áudio inválida: não é pai ou childId ausente.');
                         return;
                     }
-                    const targetChildWsStopAudio = childToWebSocket.get(extractedChildId);
+                    const targetChildWsStopAudio = childToWebSocket.get(childId);
                     if (targetChildWsStopAudio && targetChildWsStopAudio.readyState === WebSocket.OPEN) {
                         targetChildWsStopAudio.send(JSON.stringify({ type: 'stopAudioStream' }));
-                        console.log(`[Audio] Comando 'stopAudioStream' enviado para filho ${extractedChildId}.`);
+                        console.log(`[Audio] Comando 'stopAudioStream' enviado para filho ${childId}.`);
                     } else {
-                        console.warn(`[Audio] Filho ${extractedChildId} não encontrado ou offline para comando de parada de áudio.`);
-                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${extractedChildId} offline.` }));
+                        console.warn(`[Audio] Filho ${childId} não encontrado ou offline para comando de parada de áudio.`);
+                        ws.send(JSON.stringify({ type: 'error', message: `Filho ${childId} offline.` }));
                     }
                     break;
 
@@ -550,16 +555,16 @@ wssAudio.on('connection', ws => {
                         // Se o pai tem um Web Audio API (JS), ele pode receber o buffer diretamente.
                         // Se for um aplicativo Android (Kodular), ele provavelmente precisa de uma estrutura.
                         // Para simplificar e mostrar que o áudio está sendo "encaminhado":
-                         try {
-                             parentWs.send(JSON.stringify({
-                                 type: 'audioData',
-                                 childId: identifiedChildId,
-                                 data: message.toString('base64') // Codifica o buffer em base64 para enviar como JSON
-                             }));
-                             // console.log(`[WebSocket-Audio] Áudio de ${identifiedChildId} enviado para pai ${pId}.`); // Descomente para depurar
-                         } catch (jsonError) {
-                             console.error(`[WebSocket-Audio] Erro ao enviar áudio codificado para pai ${pId}:`, jsonError);
-                         }
+                            try {
+                                parentWs.send(JSON.stringify({
+                                    type: 'audioData',
+                                    childId: identifiedChildId,
+                                    data: message.toString('base64') // Codifica o buffer em base64 para enviar como JSON
+                                }));
+                                // console.log(`[WebSocket-Audio] Áudio de ${identifiedChildId} enviado para pai ${pId}.`); // Descomente para depurar
+                            } catch (jsonError) {
+                                console.error(`[WebSocket-Audio] Erro ao enviar áudio codificado para pai ${pId}:`, jsonError);
+                            }
                     }
                 });
 
@@ -606,7 +611,7 @@ server.on('upgrade', (request, socket, head) => {
     }
 });
 
-// --- INICIO DO SERVIDOR ---\
+// --- INICIO DO SERVIDOR ---
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`);
     console.log(`WebSocket de comandos (GPS, Chat) em: ws://localhost:${PORT}/ws-commands`);
