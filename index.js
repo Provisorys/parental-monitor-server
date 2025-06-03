@@ -33,7 +33,7 @@ app.use(bodyParser.json());
 
 // --- HTTP ROUTES ---
 app.get('/', (req, res) => {
-    res.send('Servidor Parental Monitor Online!');
+    res.send('Servidor Online!');
 });
 
 // Rota para registrar um novo filho
@@ -182,6 +182,7 @@ wssCommands.on('connection', ws => {
     console.log(`[WebSocket-Commands] Novo cliente conectado. Total de entradas: ${wsConnections.size}`);
 
     ws.on('message', async message => {
+        console.log(`[WebSocket-Commands] Mensagem bruta recebida: ${message}`); // Para depurar o conteúdo exato
         let parsedMessage;
         try {
             // Buffer.isBuffer(message) verifica se a mensagem é um Buffer binário
@@ -193,8 +194,7 @@ wssCommands.on('connection', ws => {
                 parsedMessage = JSON.parse(message);
             }
         } catch (e) {
-            console.error('[WebSocket-Commands] Erro ao parsear mensagem JSON:', e);
-            console.log('[WebSocket-Commands] Mensagem bruta:', message.toString());
+            console.error(`[WebSocket-Commands] ERRO ao processar mensagem: ${e.message}. Mensagem recebida (não JSON ou malformada): ${message}`); // Alterado para refletir sua mensagem de erro
             return;
         }
 
@@ -202,11 +202,12 @@ wssCommands.on('connection', ws => {
         const currentParentId = clientInfo.type === 'parent' ? clientInfo.id : clientInfo.parentId;
         const clientType = clientInfo.type;
 
-        console.log(`[WebSocket-Commands] DEBUG (before switch) - currentParentId: ${currentParentId}, clientType: ${clientType}`);
-        console.log(`[WebSocket-Commands] Mensagem JSON recebida (APÓS LÓGICA DE PARSE E VALIDAÇÃO FINAL):`, parsedMessage);
+        console.log(`[WebSocket-Commands] Desestruturado - type: ${parsedMessage.type}, parentId: ${parsedMessage.parentId}, childId (top-level): ${parsedMessage.childId}, childName (top-level): ${parsedMessage.childName}`); // Alterado para usar parsedMessage
+        console.log(`[WebSocket-Commands] Mensagem JSON recebida (APÓS LÓGICA DE PARSE E VALIDAÇÃO FINAL): ${JSON.stringify(parsedMessage)}`); // Alterado para usar parsedMessage
+        console.log(`[WebSocket-Commands] DEBUG (before switch) - currentParentId: ${currentParentId}, clientType: ${clientType}`); // Alterado para usar as variáveis locais
 
         const { type, parentId, childId, childName, data } = parsedMessage; // Desestrutura para facilitar
-        console.log(`[WebSocket-Commands] Desestruturado - type: ${type}, parentId: ${parentId}, childId (top-level): ${childId}, childName (top-level): ${childName}`);
+        // console.log(`[WebSocket-Commands] Desestruturado - type: ${type}, parentId: ${parentId}, childId (top-level): ${childId}, childName (top-level): ${childName}`); // Removido, já está na linha acima
 
 
         switch (type) {
@@ -257,7 +258,7 @@ wssCommands.on('connection', ws => {
                     }).promise();
                     console.log(`[DynamoDB] Filho ${childName} (${childId}) status de conexão atualizado para 'true'.`);
                     console.log(`[WebSocket-Commands] Filho conectado e identificado: ID: ${childId}, Parent ID: ${parentId}, Nome: ${childName}`);
-                    
+
                     // Notificar o pai (se houver) que o filho está online
                     const parentWs = wsConnections.get(parentId);
                     if (parentWs && parentWs.ws && parentWs.ws.readyState === WebSocket.OPEN) {
@@ -328,7 +329,7 @@ wssCommands.on('connection', ws => {
                     console.warn('[WebSocket-Commands] Comando startAudioStream inválido: childId faltando na data.');
                 }
                 break;
-            
+
             case 'stopAudioStream':
                 if (data && data.childId) {
                     const targetChildId = data.childId;
