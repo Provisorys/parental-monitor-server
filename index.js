@@ -191,9 +191,10 @@ wssCommands.on('connection', ws => {
             } else {
                 parsedMessage = JSON.parse(message);
             }
-
+            console.log(`[DEBUG_PARSE] parsedMessage ANTES da desestruturação:`, parsedMessage); // Adicione esta linha
             // Desestruturação das propriedades da mensagem JSON
             const { type, parentId, childId, childName, data } = parsedMessage;
+            console.log(`[DEBUG_DESTRUCT] Valores desestruturados: type=${type}, parentId=${parentId}, childId=${childId}, childName=${childName}, data=`, data); // Adicione esta linha também
 
             // Antes do switch, verifique o clientType e currentParentId
             // Usa clientInfo.type e clientInfo.id/parentId para obter os valores corretos
