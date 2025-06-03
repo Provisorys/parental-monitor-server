@@ -185,18 +185,18 @@ wssCommands.on('connection', ws => {
         console.log(`[WebSocket-Commands] Mensagem bruta recebida: ${message}`); // Para depurar o conteúdo exato
         let parsedMessage;
         try {
-            // Buffer.isBuffer(message) verifica se a mensagem é um Buffer binário
+            // Adiciona a verificação se a mensagem é um Buffer para maior robustez
             if (Buffer.isBuffer(message)) {
                 parsedMessage = JSON.parse(message.toString('utf8'));
             } else {
                 parsedMessage = JSON.parse(message);
             }
 
-            // MOVIDO: Desestruturação deve vir IMEDIATAMENTE após o parsing bem-sucedido.
-            // As variáveis type, parentId, childId, childName e data agora estarão disponíveis aqui.
+            // Desestruturação das propriedades da mensagem JSON
             const { type, parentId, childId, childName, data } = parsedMessage;
 
             // Antes do switch, verifique o clientType e currentParentId
+            // Usa clientInfo.type e clientInfo.id/parentId para obter os valores corretos
             const currentParentId = clientInfo.type === 'parent' ? clientInfo.id : clientInfo.parentId;
             const clientType = clientInfo.type;
 
