@@ -7,6 +7,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const url = require('url');
+const wsConnections = new Map(); // Adicione esta linha
 
 const app = express();
 const PORT = process.env.PORT || 10000;
