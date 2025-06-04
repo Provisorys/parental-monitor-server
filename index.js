@@ -38,37 +38,32 @@ app.get('/', (req, res) => {
     res.send('Servidor Parental Monitor Online!');
 });
 
-// Rota para registrar um novo filho
+// No index.js - Rota para registrar um novo filho
 app.post('/register-child', async (req, res) => {
-    const { parentId, childName, childToken } = req.body; // childToken é o FCM Token
+    const { childId, parentId, childName } = req.body; // <<< PEGA O childId DO CORPO DA REQUISIÇÃO
 
-    if (!parentId || !childName || !childToken) {
-        console.error('[HTTP_ERROR] Tentativa de registrar filho com dados incompletos.');
-        return res.status(400).send('Dados incompletos para o registro do filho.');
+    if (!childId || !parentId || !childName) {
+        return res.status(400).send('childId, parentId e childName são obrigatórios.');
     }
 
+    const params = {
+        TableName: DYNAMODB_TABLE_CHILDREN,
+        Item: {
+            childId: childId, // <<< USA O childId RECEBIDO DA REQUISIÇÃO
+            parentId: parentId,
+            childName: childName,
+            connected: false, // Inicialmente false
+            lastActivity: new Date().toISOString()
+        }
+    };
+
     try {
-        // Gerar um UUID para o childId
-        const childId = uuidv4();
-
-        const params = {
-            TableName: DYNAMODB_TABLE_CHILDREN,
-            Item: {
-                childId: childId,
-                parentId: parentId,
-                childName: childName,
-                childToken: childToken, // Armazena o FCM Token
-                connected: false, // Inicialmente desconectado
-                lastActivity: new Date().toISOString()
-            }
-        };
-
-        await docClient.put(params).promise();
-        console.log(`[DynamoDB] Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
-        res.status(200).json({ childId: childId, message: 'Filho registrado com sucesso!' });
+        await docClient.put(params).promise(); // <<< COLOCA NO DYNAMODB COM ESSE childId
+        console.log(`Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
+        res.status(200).send('Filho registrado com sucesso!');
     } catch (error) {
-        console.error('Erro ao registrar filho no DynamoDB:', error);
-        res.status(500).send('Erro interno do servidor ao registrar filho.');
+        console.error('Erro ao registrar filho:', error);
+        res.status(500).send('Erro ao registrar filho.');
     }
 });
 
