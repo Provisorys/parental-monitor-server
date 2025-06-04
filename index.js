@@ -28,7 +28,7 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'Locations';
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 
 app.use(cors());
