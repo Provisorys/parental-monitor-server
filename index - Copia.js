@@ -28,7 +28,7 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Mantido como solicitado
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 
 app.use(cors());
@@ -194,27 +194,21 @@ wssCommands.on('connection', ws => {
         let parsedMessage = null;
         let messageContent = Buffer.isBuffer(message) ? message.toString('utf8') : message;
 
-        // <<< MODIFICAÇÃO AQUI: Lógica de parse JSON mais robusta
-        // Tenta parsear múltiplas vezes em caso de double-stringification
-        for (let i = 0; i < 5; i++) { // Limita as tentativas para evitar loops infinitos
+        for (let i = 0; i < 5; i++) {
             try {
                 const tempParsed = JSON.parse(messageContent);
                 if (typeof tempParsed === 'object' && tempParsed !== null && !Array.isArray(tempParsed)) {
                     parsedMessage = tempParsed;
-                    break; // Sucesso: parseado para um objeto
+                    break;
                 } else {
-                    // Se não é um objeto (ex: uma string que era JSON stringificada),
-                    // tenta parsear novamente com o novo conteúdo.
                     messageContent = tempParsed;
                 }
             } catch (e) {
-                // Se o parse falha, não é JSON válido, ou não pode ser parseado mais.
                 console.error('[WS-Commands] Falha ao parsear JSON na tentativa ' + (i + 1) + ':', e.message);
-                parsedMessage = null; // Garante que parsedMessage seja null em caso de falha total
+                parsedMessage = null;
                 break;
             }
         }
-        // >>> FIM DA MODIFICAÇÃO
         
         if (!parsedMessage || typeof parsedMessage !== 'object' || Array.isArray(parsedMessage)) {
             console.error('[WS-Commands] Mensagem JSON inválida ou não é um objeto esperado (após múltiplas tentativas):', parsedMessage);
@@ -331,8 +325,13 @@ wssCommands.on('connection', ws => {
                         timestamp: effectiveTimestamp || new Date().toISOString()
                     }
                 };
-                await docClient.put(locationParams).promise();
-                console.log(`[DynamoDB] Localização armazenada para childId: ${sendingChildIdLoc}.`);
+                try { // Adicionado try-catch para PutItem
+                    await docClient.put(locationParams).promise();
+                    console.log(`[DynamoDB] Localização armazenada para childId: ${sendingChildIdLoc}.`);
+                } catch (dbError) {
+                    console.error(`[DynamoDB-Error] Erro ao armazenar localização para childId ${sendingChildIdLoc}:`, dbError);
+                    // Pode optar por notificar o pai sobre a falha de armazenamento de localização
+                }
 
                 const connectedParentWsLocation = parentToWebSocket.get(childAssociatedParentIdLoc);
                 if (connectedParentWsLocation && connectedParentWsLocation.readyState === WebSocket.OPEN) {
@@ -422,20 +421,19 @@ wssCommands.on('connection', ws => {
                     return;
                 }
                 
-                const activeAudioClientIDs = Array.from(activeAudioClients.values()).map(client => client.childId);
-                console.log(`[Audio-Server-Debug] IDs dos filhos com conexões de áudio ativas NO MOMENTO DA REQUISIÇÃO: ${activeAudioClientIDs.join(', ')}`);
-
-
+                // <<< MODIFICAÇÃO AQUI: Verificação robusta do estado do WebSocket de áudio
                 let audioWsOfChild = null;
                 for (const [audioWsInstance, clientInfo] of activeAudioClients.entries()) {
+                    // Garante que é o cliente de áudio do filho correto e NÃO é um cliente de áudio do pai (se você implementar um no futuro)
                     if (clientInfo.childId === targetChildIdForAudio && !clientInfo.isParentAudioClient) {
                         audioWsOfChild = audioWsInstance;
                         break;
                     }
                 }
 
-                console.log(`[Audio-Debug] Tentando encontrar WS de áudio do filho ${targetChildIdForAudio}. Encontrado: ${!!audioWsOfChild}. WS de Áudio Aberto: ${!!audioWsOfChild?.readyState === WebSocket.OPEN}`);
+                // VERIFICA SE O WEBSOCKET DE ÁUDIO DO FILHO EXISTE E ESTÁ ABERTO
                 if (audioWsOfChild && audioWsOfChild.readyState === WebSocket.OPEN) {
+                    console.log(`[Audio-Debug] Tentando enviar 'startRecording' para filho ${targetChildIdForAudio}. WS de Áudio Aberto: ${audioWsOfChild.readyState === WebSocket.OPEN}`);
                     audioWsOfChild.send(JSON.stringify({ type: 'startRecording' }));
                     console.log(`[Audio-Server] Comando 'startRecording' enviado para o filho ${targetChildIdForAudio} via WS de áudio.`);
 
@@ -446,9 +444,12 @@ wssCommands.on('connection', ws => {
                         message: `Comando 'startRecording' enviado para ${targetChildIdForAudio}.`
                     }));
                 } else {
-                    console.warn(`[Audio-Server] Filho ${targetChildIdForAudio} NÃO ENCONTRADO ou offline para comando de áudio.`);
-                    console.log(`[Audio-Server-Debug] Conexões de áudio ativas (IDs): ${Array.from(activeAudioClients.values()).map(c => c.childId).filter(Boolean)}`);
-
+                    console.warn(`[Audio-Server] Filho ${targetChildIdForAudio} não encontrado ou seu WS de áudio NÃO ESTÁ ABERTO (readyState: ${audioWsOfChild ? audioWsOfChild.readyState : 'null'}).`);
+                    // Se o WebSocket de áudio não estiver OPEN, remova-o do mapa para manter a consistência
+                    if (audioWsOfChild) {
+                        activeAudioClients.delete(audioWsOfChild);
+                        console.log(`[Audio-Server] Conexão de áudio de ${targetChildIdForAudio} removida do mapa activeAudioClients devido ao estado CLOSED/CLOSING/CONNECTING.`);
+                    }
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
                         status: 'childOffline',
@@ -473,6 +474,7 @@ wssCommands.on('connection', ws => {
                     }
                 }
 
+                // VERIFICA SE O WEBSOCKET DE ÁUDIO DO FILHO EXISTE E ESTÁ ABERTO
                 if (audioWsOfChildStop && audioWsOfChildStop.readyState === WebSocket.OPEN) {
                     audioWsOfChildStop.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
                     console.log(`[Audio-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForStopAudio} via WS de áudio.`);
@@ -483,7 +485,12 @@ wssCommands.on('connection', ws => {
                         message: `Comando 'stopAudioStreamFromServer' enviado para ${targetChildIdForStopAudio}.`
                     }));
                 } else {
-                    console.warn(`[Audio-Server] Filho ${targetChildIdForStopAudio} não encontrado ou offline para comando de parada de áudio.`);
+                    console.warn(`[Audio-Server] Filho ${targetChildIdForStopAudio} não encontrado ou seu WS de áudio NÃO ESTÁ ABERTO (readyState: ${audioWsOfChildStop ? audioWsOfChildStop.readyState : 'null'}) para comando de parada.`);
+                    // Se o WebSocket de áudio não estiver OPEN, remova-o do mapa
+                    if (audioWsOfChildStop) {
+                        activeAudioClients.delete(audioWsOfChildStop);
+                        console.log(`[Audio-Server] Conexão de áudio de ${targetChildIdForStopAudio} removida do mapa activeAudioClients na tentativa de parada.`);
+                    }
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
                         status: 'childOffline',
@@ -601,11 +608,14 @@ wssAudio.on('connection', (ws, req) => {
         return;
     }
 
+    // Adiciona a conexão de áudio ao mapa ativo. A chave do mapa é a instância 'ws'.
+    // O valor é um objeto com childId, parentId, e uma flag para distinguir de pais se houver um cliente de áudio do pai.
     activeAudioClients.set(ws, { childId: childId, parentId: parentId, isParentAudioClient: false });
     console.log(`[WS-Audio] Filho ${childId} conectado ao WebSocket de áudio. Parent: ${parentId}. Total de conexões de áudio: ${activeAudioClients.size}`);
 
     ws.on('message', message => {
         try {
+            // Tenta converter a mensagem para string para verificar se é um JSON de controle
             const textMessage = message.toString('utf8');
             if (textMessage.startsWith('{') && textMessage.endsWith('}')) {
                 const audioControlMessage = JSON.parse(textMessage);
@@ -614,6 +624,7 @@ wssAudio.on('connection', (ws, req) => {
                     console.log(`[WS-Audio] Filho ${childId} relatou que parou de transmitir áudio.`);
                 }
             } else if (Buffer.isBuffer(message)) {
+                // Se não é uma string JSON, assume que é um buffer de áudio binário
                 console.log(`[WS-Audio] Recebido buffer de áudio do filho ${childId}. Tamanho: ${message.length} bytes. Encaminhando para pais.`);
                 
                 const audioBase64 = message.toString('base64');
@@ -623,6 +634,7 @@ wssAudio.on('connection', (ws, req) => {
                     data: audioBase64
                 });
 
+                // Encaminha para todos os pais conectados no canal de COMANDOS
                 parentToWebSocket.forEach((parentWs, pId) => {
                     if (parentWs.readyState === WebSocket.OPEN) {
                         parentWs.send(audioMessageForParent); 
@@ -636,16 +648,21 @@ wssAudio.on('connection', (ws, req) => {
 
     ws.on('close', (code, reason) => {
         console.log(`[WS-Audio] Filho ${childId} desconectado do WebSocket de áudio. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
+        // Remove a conexão de áudio do mapa quando ela fecha
         activeAudioClients.delete(ws);
         console.log(`[WS-Audio] Conexão de áudio de ${childId} removida. Total: ${activeAudioClients.size}`);
     });
 
     ws.on('error', error => {
         console.error(`[WS-Audio] Erro no WebSocket de áudio para ${childId}:`, error);
+        // Remove a conexão de áudio do mapa em caso de erro
         activeAudioClients.delete(ws);
     });
 });
 
+// A função updateChildConnectionStatus não é mais usada diretamente nos eventos WS,
+// pois a lógica de atualização está embutida nos handlers on('message') e on('close')
+// do wssCommands. Mantida apenas como referência, pode ser removida se não for usada em outro lugar.
 async function updateChildConnectionStatus(childId, connected) {
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
