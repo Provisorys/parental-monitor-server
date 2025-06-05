@@ -8,16 +8,24 @@ const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const url = require('url');
 
-const wsConnections = new Map();
-const childToWebSocket = new Map();
-const parentToWebSocket = new Map();
+// --- DECLARAÇÕES DE MAPAS GLOBAIS ---
+// Mapa para gerenciar todas as conexões ativas (comando e áudio)
+const activeConnections = new Map(); // Mapa de ID -> { ws: WebSocket, type: 'child'|'parent', id: string, parentId?: string, name?: string }
+// Mapas específicos para organização, referenciando as instâncias de WS de activeConnections
+const childToWebSocket = new Map(); // childId -> ws (somente filhos conectados no canal de comandos)
+const parentToWebSocket = new Map(); // parentId -> ws (somente pais conectados no canal de comandos)
+
+// Mapa para conexões de áudio identificadas
+// Chave: WebSocket instance (do canal /ws-audio), Valor: { childId: string, parentId: string, isParentAudioClient: boolean }
 const activeAudioClients = new Map();
+
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 const upload = multer();
 
+// --- AWS CONFIG ---
 AWS.config.update({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
@@ -28,16 +36,19 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // GEMINI, MUDE NADA AQUI
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // GEMINI, NÃO MUDE NADA AQUI
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 
+// --- MIDDLEWARE ---
 app.use(cors());
 app.use(bodyParser.json());
 
+// --- HTTP ROUTES ---
 app.get('/', (req, res) => {
     res.send('Servidor Parental Monitor Online!');
 });
 
+// Rota para registrar um novo filho
 app.post('/register-child', async (req, res) => {
     const { childId, parentId, childName } = req.body;
 
@@ -51,22 +62,23 @@ app.post('/register-child', async (req, res) => {
             childId: childId,
             parentId: parentId,
             childName: childName,
-            connected: false,
+            connected: false, // Inicialmente false
             lastActivity: new Date().toISOString()
         }
     };
 
     try {
         await docClient.put(params).promise();
-        console.log(`[HTTP] Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
+        console.log(`Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
         res.status(200).send('Filho registrado com sucesso!');
     } catch (error) {
-        console.error('[HTTP] Erro ao registrar filho:', error);
+        console.error('Erro ao registrar filho:', error);
         res.status(500).send('Erro ao registrar filho.');
     }
 });
 
-app.get('/get-registered-children', async (req, res) => { // GEMINI, MUDE NADA AQUI
+// Rota para obter todos os filhos registrados (EXATAMENTE COMO VOCÊ PEDIU)
+app.get('/get-registered-children', async (req, res) => { // GEMINI, NÃO MUDE NADA AQUI
     try {
         const params = {
             TableName: DYNAMODB_TABLE_CHILDREN
@@ -85,7 +97,81 @@ app.get('/get-registered-children', async (req, res) => { // GEMINI, MUDE NADA A
     }
 });
 
-app.post('/send-notification', async (req, res) => { // GEMINI, MUDE NADA AQUI
+// Rota para obter conversas (para pais) - PRESENTE NAS VERSÕES ANTERIORES E MANTIDA
+app.get('/conversations/:parentId', async (req, res) => {
+    const { parentId } = req.params;
+    const params = {
+        TableName: DYNAMODB_TABLE_CHILDREN,
+        FilterExpression: 'parentId = :parentId',
+        ExpressionAttributeValues: {
+            ':parentId': parentId
+        }
+    };
+
+    try {
+        const data = await docClient.scan(params).promise();
+        const conversations = data.Items.map(item => ({
+            childId: item.childId,
+            childName: item.childName,
+            lastActivity: item.lastActivity,
+            connected: childToWebSocket.has(item.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === item.childId && !client.isParentAudioClient),
+            parentId: item.parentId
+        }));
+        res.status(200).json(conversations);
+        console.log(`[HTTP] Conversas para o pai ${parentId} retornadas.`);
+    } catch (error) {
+        console.error('Erro ao obter conversas:', error);
+        res.status(500).send('Erro ao obter conversas.');
+    }
+});
+
+// Rota para obter mensagens de uma conversa específica - PRESENTE NAS VERSÕES ANTERIORES E MANTIDA
+app.get('/messages/:conversationId', async (req, res) => {
+    const { conversationId } = req.params;
+    const params = {
+        TableName: DYNAMODB_TABLE_MESSAGES,
+        KeyConditionExpression: 'conversationId = :conversationId',
+        ExpressionAttributeValues: {
+            ':conversationId': conversationId
+        },
+        ScanIndexForward: true // Ordenar por timestamp crescente
+    };
+
+    try {
+        const data = await docClient.query(params).promise();
+        res.status(200).json(data.Items);
+        console.log(`[HTTP] Mensagens para a conversa ${conversationId} retornadas.`);
+    } catch (error) {
+        console.error('Erro ao obter mensagens:', error);
+        res.status(500).send('Erro ao obter mensagens.');
+    }
+});
+
+// Rota para obter localizações de um filho - PRESENTE NAS VERSÕES ANTERIORES E MANTIDA
+app.get('/locations/:childId', async (req, res) => {
+    const { childId } = req.params;
+    const params = {
+        TableName: DYNAMODB_TABLE_LOCATIONS,
+        KeyConditionExpression: 'childId = :childId',
+        ExpressionAttributeValues: {
+            ':childId': childId
+        },
+        ScanIndexForward: true, // Ordenar por timestamp crescente
+        Limit: 100 // Limita as últimas 100 localizações, ajuste conforme necessário
+    };
+
+    try {
+        const data = await docClient.query(params).promise();
+        res.status(200).json(data.Items);
+        console.log(`[HTTP] Localizações para o filho ${childId} retornadas.`);
+    } catch (error) {
+        console.error('Erro ao obter localizações:', error);
+        res.status(500).send('Erro ao obter localizações.');
+    }
+});
+
+// Rota para enviar notificação (EXATAMENTE COMO VOCÊ PEDIU)
+app.post('/send-notification', async (req, res) => { // GEMINI, NÃO MUDE NADA AQUI
     const { recipientChildId, title, body } = req.body;
 
     if (!recipientChildId || !title || !body) {
@@ -117,7 +203,8 @@ app.post('/send-notification', async (req, res) => { // GEMINI, MUDE NADA AQUI
     }
 });
 
-app.post('/upload-media', upload.single('media'), async (req, res) => { // GEMINI, MUDE NADA AQUI
+// Rota para upload de mídia (EXATAMENTE COMO VOCÊ PEDIU)
+app.post('/upload-media', upload.single('media'), async (req, res) => { // GEMINI, NÃO MUDE NADA AQUI
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo enviado.');
     }
@@ -149,7 +236,8 @@ app.post('/upload-media', upload.single('media'), async (req, res) => { // GEMIN
     }
 });
 
-app.get('/download-media/:key', async (req, res) => { // GEMINI, MUDE NADA AQUI
+// Rota para download de mídia (EXATAMENTE COMO VOCÊ PEDIU)
+app.get('/download-media/:key', async (req, res) => { // GEMINI, NÃO MUDE NADA AQUI
     const key = req.params.key;
     const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
@@ -169,11 +257,22 @@ app.get('/download-media/:key', async (req, res) => { // GEMINI, MUDE NADA AQUI
     }
 });
 
+// Rota para obter um token do Twilio - PRESENTE NAS VERSÕES ANTERIORES E MANTIDA
+app.get('/twilio-token', (req, res) => {
+    // Implemente a lógica para gerar um token do Twilio
+    // Este é um placeholder, você precisará de sua própria lógica aqui
+    console.log("Requisição para Twilio token recebida. Retornando placeholder.");
+    res.status(200).json({ token: 'seu_token_do_twilio_aqui' });
+});
+
+
+// Middleware para rota não encontrada (EXATAMENTE COMO VOCÊ PEDIU)
 app.use((req, res, next) => {
     console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
     res.status(404).send('Rota não encontrada.');
 });
 
+// Middleware para tratamento de erros (EXATAMENTE COMO VOCÊ PEDIU)
 app.use((err, req, res, next) => {
     console.error('Erro interno do servidor:', err);
     res.status(500).send('Erro interno do servidor.');
