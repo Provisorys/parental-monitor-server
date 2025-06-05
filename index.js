@@ -8,10 +8,12 @@ const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const url = require('url');
 
-const wsConnections = new Map();
-const childToWebSocket = new Map();
-const parentToWebSocket = new Map();
-const activeAudioClients = new Map();
+// --- DECLARAÇÕES DE MAPS DE CONEXÃO ---
+const wsConnections = new Map(); // Parece não ser usado diretamente, mas pode ser um resquício
+const childToWebSocket = new Map(); // Mapeia childId para WebSocket do filho (comandos)
+const parentToWebSocket = new Map(); // Mapeia parentId para WebSocket do pai (comandos)
+const activeAudioClients = new Map(); // Mapeia WebSocket de áudio para info do filho
+const activeConnections = new Map(); // <<< CORREÇÃO: Variável 'activeConnections' declarada aqui.
 
 const app = express();
 const PORT = process.env.PORT || 10000;
