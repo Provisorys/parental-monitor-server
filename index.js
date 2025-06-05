@@ -8,24 +8,16 @@ const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const url = require('url');
 
-// --- DECLARAÇÕES DE MAPAS GLOBAIS ---
-// Mapa para gerenciar todas as conexões ativas (comando e áudio)
-const activeConnections = new Map(); // Mapa de ID -> { ws: WebSocket, type: 'child'|'parent', id: string, parentId?: string, name?: string }
-// Mapas específicos para organização, referenciando as instâncias de WS de activeConnections
-const childToWebSocket = new Map(); // childId -> ws (somente filhos conectados no canal de comandos)
-const parentToWebSocket = new Map(); // parentId -> ws (somente pais conectados no canal de comandos)
-
-// Mapa para conexões de áudio identificadas
-// Chave: WebSocket instance (do canal /ws-audio), Valor: { childId: string, parentId: string, isParentAudioClient: boolean }
+const wsConnections = new Map();
+const childToWebSocket = new Map();
+const parentToWebSocket = new Map();
 const activeAudioClients = new Map();
-
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 const upload = multer();
 
-// --- AWS CONFIG ---
 AWS.config.update({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
@@ -36,19 +28,16 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'Locations'; // Alterei de volta para 'Locations' para consistência, se o seu for 'GPSintegracao' mude de volta
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // GEMINI, MUDE NADA AQUI
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 
-// --- MIDDLEWARE ---
 app.use(cors());
 app.use(bodyParser.json());
 
-// --- HTTP ROUTES ---
 app.get('/', (req, res) => {
     res.send('Servidor Parental Monitor Online!');
 });
 
-// Rota para registrar um novo filho
 app.post('/register-child', async (req, res) => {
     const { childId, parentId, childName } = req.body;
 
@@ -62,131 +51,132 @@ app.post('/register-child', async (req, res) => {
             childId: childId,
             parentId: parentId,
             childName: childName,
-            connected: false, // Inicialmente false
+            connected: false,
             lastActivity: new Date().toISOString()
         }
     };
 
     try {
         await docClient.put(params).promise();
-        console.log(`Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
+        console.log(`[HTTP] Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
         res.status(200).send('Filho registrado com sucesso!');
     } catch (error) {
-        console.error('Erro ao registrar filho:', error);
+        console.error('[HTTP] Erro ao registrar filho:', error);
         res.status(500).send('Erro ao registrar filho.');
     }
 });
 
-
-// Rota RESTAURADA: Obter todos os filhos registrados para um pai específico
-app.get('/get-registered-children/:parentId', async (req, res) => {
-    const { parentId } = req.params;
-    const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN,
-        FilterExpression: 'parentId = :parentId',
-        ExpressionAttributeValues: {
-            ':parentId': parentId
-        }
-    };
-
+app.get('/get-registered-children', async (req, res) => { // GEMINI, MUDE NADA AQUI
     try {
+        const params = {
+            TableName: DYNAMODB_TABLE_CHILDREN
+        };
         const data = await docClient.scan(params).promise();
-        // Adiciona o status de conexão em tempo real
-        const children = data.Items.map(item => ({
-            ...item,
-            connected: childToWebSocket.has(item.childId) // Verifica se o filho está conectado via WS de comandos
+        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela 'Children'. Encontrados ${data.Items.length} filhos.`);
+        
+        const childrenWithStatus = data.Items.map(child => ({
+            ...child,
+            connected: childToWebSocket.has(child.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === child.childId && !client.isParentAudioClient)
         }));
-        res.status(200).json(children);
-        console.log(`[HTTP] Filhos registrados para o pai ${parentId} retornados.`);
+        res.status(200).json(childrenWithStatus);
     } catch (error) {
-        console.error('Erro ao buscar filhos registrados:', error);
-        res.status(500).send('Erro ao buscar filhos registrados.');
+        console.error('Erro ao buscar filhos no DynamoDB:', error);
+        res.status(500).send('Erro interno do servidor ao buscar filhos.');
     }
 });
 
+app.post('/send-notification', async (req, res) => { // GEMINI, MUDE NADA AQUI
+    const { recipientChildId, title, body } = req.body;
 
-// Rota RESTAURADA: Obter conversas (para pais)
-app.get('/conversations/:parentId', async (req, res) => {
-    const { parentId } = req.params;
-    const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN,
-        FilterExpression: 'parentId = :parentId',
-        ExpressionAttributeValues: {
-            ':parentId': parentId
+    if (!recipientChildId || !title || !body) {
+        return res.status(400).send('Dados incompletos para enviar notificação.');
+    }
+
+    try {
+        const params = {
+            TableName: DYNAMODB_TABLE_CHILDREN,
+            Key: {
+                childId: recipientChildId
+            }
+        };
+        const data = await docClient.get(params).promise();
+        const child = data.Item;
+
+        if (!child || !child.childToken) {
+            return res.status(404).send('Filho não encontrado ou sem token FCM registrado.');
         }
-    };
 
-    try {
-        const data = await docClient.scan(params).promise();
-        const conversations = data.Items.map(item => ({
-            childId: item.childId,
-            childName: item.childName,
-            lastActivity: item.lastActivity,
-            // Verifica se há conexão de comando OU de áudio para o status 'connected'
-            connected: childToWebSocket.has(item.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === item.childId && !client.isParentAudioClient),
-            parentId: item.parentId
-        }));
-        res.status(200).json(conversations);
-        console.log(`[HTTP] Conversas para o pai ${parentId} retornadas.`);
+        const fcmToken = child.childToken;
+
+        console.log(`[FCM] Simulação: Notificação '${title}' para ${fcmToken} (${recipientChildId})`);
+        res.status(200).send('Notificação processada (requer integração Firebase Admin).');
+
     } catch (error) {
-        console.error('Erro ao obter conversas:', error);
-        res.status(500).send('Erro ao obter conversas.');
+        console.error('Erro ao enviar notificação:', error);
+        res.status(500).send('Erro interno do servidor ao enviar notificação.');
     }
 });
 
+app.post('/upload-media', upload.single('media'), async (req, res) => { // GEMINI, MUDE NADA AQUI
+    if (!req.file) {
+        return res.status(400).send('Nenhum arquivo enviado.');
+    }
 
-// Rota RESTAURADA: Obter mensagens de uma conversa específica
-app.get('/messages/:conversationId', async (req, res) => {
-    const { conversationId } = req.params;
+    const { childId, type } = req.body;
+
+    if (!childId || !type) {
+        return res.status(400).send('childId ou type não fornecidos.');
+    }
+
+    const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
+    const key = `${childId}/${type}/${uuidv4()}-${req.file.originalname}`;
+
     const params = {
-        TableName: DYNAMODB_TABLE_MESSAGES,
-        KeyConditionExpression: 'conversationId = :conversationId',
-        ExpressionAttributeValues: {
-            ':conversationId': conversationId
-        },
-        ScanIndexForward: true // Ordenar por timestamp crescente
+        Bucket: bucketName,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype,
+        ACL: 'private'
     };
 
     try {
-        const data = await docClient.query(params).promise();
-        res.status(200).json(data.Items);
-        console.log(`[HTTP] Mensagens para a conversa ${conversationId} retornadas.`);
+        const data = await s3.upload(params).promise();
+        console.log(`[S3] Mídia ${key} (${type}) do filho ${childId} carregada com sucesso.`, data.Location);
+        res.status(200).json({ url: data.Location, key: data.Key });
     } catch (error) {
-        console.error('Erro ao obter mensagens:', error);
-        res.status(500).send('Erro ao obter mensagens.');
+        console.error('Erro ao fazer upload para S3:', error);
+        res.status(500).send('Erro no upload do arquivo.');
     }
 });
 
+app.get('/download-media/:key', async (req, res) => { // GEMINI, MUDE NADA AQUI
+    const key = req.params.key;
+    const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
 
-// Rota RESTAURADA: Obter localizações de um filho
-app.get('/locations/:childId', async (req, res) => {
-    const { childId } = req.params;
     const params = {
-        TableName: DYNAMODB_TABLE_LOCATIONS,
-        KeyConditionExpression: 'childId = :childId',
-        ExpressionAttributeValues: {
-            ':childId': childId
-        },
-        ScanIndexForward: true, // Ordenar por timestamp crescente
-        Limit: 100 // Limita as últimas 100 localizações, ajuste conforme necessário
+        Bucket: bucketName,
+        Key: key
     };
 
     try {
-        const data = await docClient.query(params).promise();
-        res.status(200).json(data.Items);
-        console.log(`[HTTP] Localizações para o filho ${childId} retornadas.`);
+        const data = await s3.getObject(params).promise();
+        res.setHeader('Content-Disposition', `attachment; filename="${key.split('/').pop()}"`);
+        res.setHeader('Content-Type', data.ContentType);
+        res.send(data.Body);
     } catch (error) {
-        console.error('Erro ao obter localizações:', error);
-        res.status(500).send('Erro ao obter localizações.');
+        console.error('Erro ao baixar arquivo do S3:', error);
+        res.status(404).send('Arquivo não encontrado ou erro de servidor.');
     }
 });
 
-// Rota para obter um token do Twilio
-app.get('/twilio-token', (req, res) => {
-    // Implemente a lógica para gerar um token do Twilio
-    // Este é um placeholder, você precisará de sua própria lógica aqui
-    console.log("Requisição para Twilio token recebida. Retornando placeholder.");
-    res.status(200).json({ token: 'seu_token_do_twilio_aqui' });
+app.use((req, res, next) => {
+    console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
+    res.status(404).send('Rota não encontrada.');
+});
+
+app.use((err, req, res, next) => {
+    console.error('Erro interno do servidor:', err);
+    res.status(500).send('Erro interno do servidor.');
 });
 
 // --- WEBSOCKET SERVERS ---
@@ -612,7 +602,7 @@ wssAudio.on('connection', (ws, req) => {
                     console.log(`[Audio-WS] Filho ${childId} relatou que parou de transmitir áudio.`);
                 }
             } else if (Buffer.isBuffer(message)) {
-                // MODIFICAÇÃO CRÍTICA AQUI: ENCODIFICA O ÁUDIO EM BASE64 E EMBALA EM JSON
+                // APENAS ESTA PARTE FOI MODIFICADA: ENCODIFICA O ÁUDIO EM BASE64 E EMBALA EM JSON
                 const audioBase64 = message.toString('base64');
                 const audioDataJson = JSON.stringify({
                     type: 'audioData',
@@ -622,8 +612,6 @@ wssAudio.on('connection', (ws, req) => {
 
                 // Encaminha para os pais conectados no CANAL DE COMANDOS
                 parentToWebSocket.forEach((parentWs, pId) => {
-                    // Adicione lógica para encaminhar APENAS para o pai cujo childId está associado, se necessário
-                    // Por enquanto, envia para todos os pais conectados no canal de comando.
                     if (parentWs.readyState === WebSocket.OPEN) {
                         parentWs.send(audioDataJson);
                         // console.log(`[Audio-WS] Encaminhando áudio em Base64 do filho ${childId} para o pai ${pId}. Tamanho JSON: ${audioDataJson.length}`);
