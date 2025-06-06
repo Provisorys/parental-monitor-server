@@ -9,11 +9,11 @@ const { v4: uuidv4 } = require('uuid');
 const url = require('url');
 
 // --- DECLARAÇÕES DE MAPS DE CONEXÃO ---
-const wsConnections = new Map(); // Parece não ser usado diretamente, mas pode ser um resquício
-const childToWebSocket = new Map(); // Mapeia childId para WebSocket do filho (comandos)
-const parentToWebSocket = new Map(); // Mapeia parentId para WebSocket do pai (comandos)
-const activeAudioClients = new Map(); // Mapeia WebSocket de áudio para info do filho
-const activeConnections = new Map(); // Variável 'activeConnections' declarada aqui.
+const wsConnections = new Map();
+const childToWebSocket = new Map();
+const parentToWebSocket = new Map();
+const activeAudioClients = new Map();
+const activeConnections = new Map();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -30,7 +30,7 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // GEMINI, NÃO MUDE NADA AQUI
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 
 app.use(cors());
@@ -71,7 +71,7 @@ app.post('/register-child', async (req, res) => {
 app.get('/get-registered-children', async (req, res) => {
     try {
         const params = {
-            TableName: DYNAMODB_TABLE_CHILDREN
+            TableName: DODB_TABLE_CHILDREN
         };
         const data = await docClient.scan(params).promise();
         console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela 'Children'. Encontrados ${data.Items.length} filhos.`);
@@ -277,47 +277,47 @@ wssCommands.on('connection', ws => {
     console.log(`[WebSocket-Commands] Novo cliente conectado (temp ID: ${ws.id}). Total de entradas: ${activeConnections.size}`);
 
     ws.on('message', async message => {
-        let parsedMessage = null;
-        let finalParsedMessage = null; // Variável para o objeto JSON final
+        let finalParsedMessage = null;
 
         try {
-            const messageString = (Buffer.isBuffer(message) ? message.toString('utf8') : message).trim();
+            let messageString = (Buffer.isBuffer(message) ? message.toString('utf8') : message).trim();
             
             console.log(`[WebSocket-Commands] Mensagem bruta TRIMMADA para parse: '${messageString}'`);
 
-            // Primeiro parse: pode ser uma string ou o JSON direto
-            parsedMessage = JSON.parse(messageString);
-            
-            // Se o primeiro parse resultar em uma string, tentar parsear novamente
-            if (typeof parsedMessage === 'string') {
-                console.log(`[WebSocket-Commands] Tentando re-parsear a string: '${parsedMessage}'`);
+            // --- Lógica para lidar com JSON duplamente stringificado ---
+            // Detecta se a string começa e termina com aspas literais E contém aspas escapadas internas
+            if (messageString.startsWith('"') && messageString.endsWith('"') && messageString.includes('\\"')) {
+                console.log(`[WebSocket-Commands] Detectado JSON duplamente stringificado. Tentando des-stringificar.`);
                 try {
-                    finalParsedMessage = JSON.parse(parsedMessage);
-                } catch (innerError) {
-                    // Se o re-parse falhar, é porque a string interna não era JSON válido
-                    console.error('[WebSocket-Commands] Erro ao re-parsear string interna:', innerError.message);
-                    throw new Error('JSON formatado incorretamente (duplamente stringificado com conteúdo inválido).');
+                    // Remove as aspas externas literais
+                    messageString = messageString.substring(1, messageString.length - 1);
+                    // Desescapa as aspas internas (e quaisquer outras barras invertidas duplas)
+                    messageString = messageString.replace(/\\"/g, '"');
+                    messageString = messageString.replace(/\\\\/g, '\\'); // Para lidar com escapes de barras invertidas duplas
+                    console.log(`[WebSocket-Commands] Mensagem des-stringificada e desescapada: '${messageString}'`);
+                } catch (e) {
+                    console.warn(`[WebSocket-Commands] Falha na des-stringificação inicial, prosseguindo com a string original. Erro: ${e.message}`);
+                    // Se falhar, use a string original e deixe o JSON.parse principal lidar com isso (e falhar).
                 }
-            } else {
-                // Se o primeiro parse já resultou em um objeto (ou outro tipo que não string)
-                finalParsedMessage = parsedMessage;
             }
+            // --- Fim da lógica para lidar com JSON duplamente stringificado ---
 
-            // Debugging the final parsed object's type and properties
+            finalParsedMessage = JSON.parse(messageString);
+            
             console.log(`[WebSocket-Commands] DEBUG FINAL: typeof finalParsedMessage: ${typeof finalParsedMessage}`);
             console.log(`[WebSocket-Commands] DEBUG FINAL: finalParsedMessage === null: ${finalParsedMessage === null}`);
             console.log(`[WebSocket-Commands] DEBUG FINAL: Array.isArray(finalParsedMessage): ${Array.isArray(finalParsedMessage)}`);
 
 
             if (typeof finalParsedMessage !== 'object' || finalParsedMessage === null || Array.isArray(finalParsedMessage)) {
-                console.error('[WebSocket-Commands] Mensagem parseada inválida (não é um objeto JSON esperado APÓS RE-PARSE):', finalParsedMessage); 
+                console.error('[WebSocket-Commands] Mensagem parseada inválida (não é um objeto JSON esperado APÓS TRATAMENTO):', finalParsedMessage); 
                 ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido ou corrompido.' }));
                 return;
             }
 
             console.log('[WebSocket-Commands] Mensagem JSON recebida (após validação final):', finalParsedMessage);
 
-            const { type, parentId, childId, childName, latitude, longitude, timestamp, message: chatMessageContent, data } = finalParsedMessage; // Usar finalParsedMessage
+            const { type, parentId, childId, childName, latitude, longitude, timestamp, message: chatMessageContent, data } = finalParsedMessage;
             
             let effectiveChildId = childId;
             let effectiveChildName = childName;
@@ -395,7 +395,7 @@ wssCommands.on('connection', ws => {
                             console.log(`[WS-Commands] Notificação de status 'online' enviada para o pai ${ws.currentParentId} para o filho ${ws.currentChildId}.`);
                         }
                     } else {
-                        console.warn('[WS-Commands] Mensagem childConnect inválida: childId ou parentId faltando.', finalParsedMessage); // Usar finalParsedMessage
+                        console.warn('[WS-Commands] Mensagem childConnect inválida: childId ou parentId faltando.', finalParsedMessage);
                     }
                     break;
                 case 'locationUpdate':
@@ -690,6 +690,7 @@ wssAudio.on('connection', (ws, req) => {
         try {
             const messageString = Buffer.isBuffer(message) ? message.toString('utf8') : message;
             
+            // A lógica de áudio no filho já deve estar enviando JSON direto, mas este fallback ajuda
             if (messageString.startsWith('{') && messageString.endsWith('}')) {
                 const parsedAudioData = JSON.parse(messageString);
                 if (parsedAudioData.type === 'audioData' && parsedAudioData.data) {
