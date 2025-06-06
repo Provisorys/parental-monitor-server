@@ -13,7 +13,7 @@ const wsConnections = new Map(); // Parece não ser usado diretamente, mas pode 
 const childToWebSocket = new Map(); // Mapeia childId para WebSocket do filho (comandos)
 const parentToWebSocket = new Map(); // Mapeia parentId para WebSocket do pai (comandos)
 const activeAudioClients = new Map(); // Mapeia WebSocket de áudio para info do filho
-const activeConnections = new Map(); // <<< CORREÇÃO: Variável 'activeConnections' declarada aqui.
+const activeConnections = new Map(); // Variável 'activeConnections' declarada aqui.
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -104,7 +104,7 @@ app.get('/conversations/:parentId', async (req, res) => {
             childId: item.childId,
             childName: item.childName,
             lastActivity: item.lastActivity,
-            connected: childToWebSocket.has(item.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === item.childId && !client.isParentAudioClient),
+            connected: childToWebSocket.has(item.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === item.childId && !item.isParentAudioClient),
             parentId: item.parentId
         }));
         res.status(200).json(conversations);
@@ -493,23 +493,29 @@ wssCommands.on('connection', ws => {
                     }
 
                     const targetChildClientWsLocation = childToWebSocket.get(targetChildIdForLocation); // Conexão WS de COMANDOS do filho
-                    const audioWsOfChild = findAudioWsForChild(targetChildIdForLocation); // Conexão WS de ÁUDIO do filho
+                    // Removido: const audioWsOfChild = findAudioWsForChild(targetChildIdForLocation); // Este é o WS de ÁUDIO do filho
 
                     if (targetChildClientWsLocation && targetChildClientWsLocation.readyState === WebSocket.OPEN) {
-                        // 1. Envia comando para o filho começar a enviar localização
-                        targetChildClientWsLocation.send(JSON.stringify({ type: 'startLocationUpdates' })); // NOVO COMANDO PARA O FILHO
-                        console.log(`[Location-Server] Comando 'startLocationUpdates' enviado para filho ${targetChildIdForLocation}.`);
+                        // 1. Envia comando para o filho começar a enviar localização (VAI PARA O CANAL DE COMANDOS)
+                        targetChildClientWsLocation.send(JSON.stringify({ type: 'startLocationUpdates' }));
+                        console.log(`[Location-Server] Comando 'startLocationUpdates' enviado para filho ${targetChildIdForLocation} via WS de comandos.`);
                         ws.send(JSON.stringify({ type: 'info', message: `Solicitando localização para ${targetChildIdForLocation}.` }));
                     } else {
                         console.warn(`[Location-Server] Filho ${targetChildIdForLocation} não encontrado ou offline para requisição de localização.`);
                         ws.send(JSON.stringify({ type: 'error', message: `Filho ${targetChildIdForLocation} offline para GPS.` }));
-                        return; // Sai se o filho não está online para comandos
+                        return;
                     }
 
-                    // 2. Se houver streaming de áudio ativo, envia comando para o filho parar
-                    if (audioWsOfChild && audioWsOfChild.readyState === WebSocket.OPEN) {
-                        audioWsOfChild.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
-                        console.log(`[Audio-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForLocation} ao iniciar GPS.`);
+                    // 2. Se houver streaming de áudio ativo, envia comando para o filho parar (VAI PARA O CANAL DE COMANDOS)
+                    // O filho deve parar o áudio quando receber o comando de iniciar o GPS no canal de comandos.
+                    // Não precisamos enviar um comando separado para o canal de áudio aqui.
+                    // O MonitoringService do filho já lida com a exclusividade.
+                    const audioWsOfChildStopOnGpsStart = findAudioWsForChild(targetChildIdForLocation);
+                    if (audioWsOfChildStopOnGpsStart && audioWsOfChildStopOnGpsStart.readyState === WebSocket.OPEN) {
+                         // Se há uma conexão de áudio ativa, sinaliza para ela parar, mesmo que o comando principal seja via WS-Commands
+                         // Isso é um fallback se o MonitoringService não pegar a exclusividade via startLocationUpdates
+                         audioWsOfChildStopOnGpsStart.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
+                         console.log(`[Audio-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForLocation} (canal de áudio) ao iniciar GPS.`);
                     }
                     break;
 
@@ -523,14 +529,14 @@ wssCommands.on('connection', ws => {
                         return;
                     }
                     
-                    const audioWsOfChildStart = findAudioWsForChild(targetChildIdForAudio); // Conexão WS de ÁUDIO do filho
-                    const targetChildClientWsCommands = childToWebSocket.get(targetChildIdForAudio); // Conexão WS de COMANDOS do filho
+                    const targetChildClientWsCommandsForAudio = childToWebSocket.get(targetChildIdForAudio); // Conexão WS de COMANDOS do filho
+                    // Removido: const audioWsOfChildStart = findAudioWsForChild(targetChildIdForAudio); // Este é o WS de ÁUDIO do filho
 
 
-                    if (audioWsOfChildStart && audioWsOfChildStart.readyState === WebSocket.OPEN) {
-                        // 1. Envia comando para o filho começar a transmitir áudio
-                        audioWsOfChildStart.send(JSON.stringify({ type: 'startRecording' }));
-                        console.log(`[Audio-Server] Comando 'startRecording' enviado para o filho ${targetChildIdForAudio} via WS de áudio.`);
+                    if (targetChildClientWsCommandsForAudio && targetChildClientWsCommandsForAudio.readyState === WebSocket.OPEN) {
+                        // 1. Envia comando para o filho começar a transmitir áudio (VAI PARA O CANAL DE COMANDOS)
+                        targetChildClientWsCommandsForAudio.send(JSON.stringify({ type: 'startRecording' })); // <<< CORREÇÃO AQUI!
+                        console.log(`[Audio-Server] Comando 'startRecording' enviado para o filho ${targetChildIdForAudio} via WS de COMANDOS.`);
 
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
@@ -539,23 +545,25 @@ wssCommands.on('connection', ws => {
                             message: `Comando 'startRecording' enviado para ${targetChildIdForAudio}.`
                         }));
                     } else {
-                        console.warn(`[Audio-Server] Filho ${targetChildIdForAudio} NÃO ENCONTRADO ou offline no canal de áudio para comando de áudio.`);
-                        console.log(`[Audio-Server-Debug] Conexões de áudio ativas (IDs): ${Array.from(activeAudioClients.values()).map(c => c.childId).filter(Boolean)}`);
+                        console.warn(`[Audio-Server] Filho ${targetChildIdForAudio} NÃO ENCONTRADO ou offline no canal de COMANDOS para comando de áudio.`);
+                        console.log(`[Audio-Server-Debug] Conexões de COMANDO ativas (IDs): ${Array.from(childToWebSocket.keys()).filter(Boolean)}`);
 
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'childOffline',
                             childId: targetChildIdForAudio,
-                            message: `Filho ${targetChildIdForAudio} offline ou não conectado ao WS de áudio.`
+                            message: `Filho ${targetChildIdForAudio} offline ou não conectado ao WS de comandos.`
                         }));
-                        return; // Sai se o filho não está online para áudio
+                        return;
                     }
 
-                    // 2. Se houver localização ativa, envia comando para o filho parar
-                    // Note: o comando 'stopLocationUpdates' deve ir pelo canal de comandos do filho.
-                    if (targetChildClientWsCommands && targetChildClientWsCommands.readyState === WebSocket.OPEN) {
-                        targetChildClientWsCommands.send(JSON.stringify({ type: 'stopLocationUpdates' })); // NOVO COMANDO PARA O FILHO
-                        console.log(`[Location-Server] Comando 'stopLocationUpdates' enviado para o filho ${targetChildIdForAudio} ao iniciar áudio.`);
+                    // 2. Se houver localização ativa, envia comando para o filho parar (VAI PARA O CANAL DE COMANDOS)
+                    // O filho deve parar o GPS quando receber o comando de iniciar o áudio no canal de comandos.
+                    // Não precisamos enviar um comando separado para o canal de localização aqui.
+                    // O MonitoringService do filho já lida com a exclusividade.
+                    if (targetChildClientWsCommandsForAudio && targetChildClientWsCommandsForAudio.readyState === WebSocket.OPEN) {
+                        targetChildClientWsCommandsForAudio.send(JSON.stringify({ type: 'stopLocationUpdates' }));
+                        console.log(`[Location-Server] Comando 'stopLocationUpdates' enviado para o filho ${targetChildIdForAudio} via WS de COMANDOS ao iniciar áudio.`);
                     }
                     break;
                 case 'stopAudioStream': // PARENT -> SERVER: Pai solicita parada de áudio
@@ -566,11 +574,11 @@ wssCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de áudio inválida.' }));
                         return;
                     }
-                    let audioWsOfChildStop = findAudioWsForChild(targetChildIdForStopAudio);
+                    const childWsStopAudio = childToWebSocket.get(targetChildIdForStopAudio); //<<< USAR O CANAL DE COMANDOS DO FILHO
 
-                    if (audioWsOfChildStop && audioWsOfChildStop.readyState === WebSocket.OPEN) {
-                        audioWsOfChildStop.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
-                        console.log(`[Audio-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForStopAudio} via WS de áudio.`);
+                    if (childWsStopAudio && childWsStopAudio.readyState === WebSocket.OPEN) {
+                        childWsStopAudio.send(JSON.stringify({ type: 'stopAudioStreamFromServer' })); // <<< CORREÇÃO AQUI!
+                        console.log(`[Audio-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForStopAudio} via WS de COMANDOS.`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'stopped',
@@ -578,19 +586,19 @@ wssCommands.on('connection', ws => {
                             message: `Comando 'stopAudioStreamFromServer' enviado para ${targetChildIdForStopAudio}.`
                         }));
                     } else {
-                        console.warn(`[Audio-Server] Filho ${targetChildIdForStopAudio} não encontrado ou offline para comando de parada de áudio.`);
+                        console.warn(`[Audio-Server] Filho ${targetChildIdForStopAudio} não encontrado ou offline no canal de COMANDOS para comando de parada de áudio.`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'childOffline',
                             childId: targetChildIdForStopAudio,
-                            message: `Filho ${targetChildIdForStopAudio} offline ou não conectado ao WS de áudio para parada.`
+                            message: `Filho ${targetChildIdForStopAudio} offline ou não conectado ao WS de comandos para parada.`
                         }));
                     }
                     break;
                 case 'stopLocationUpdates': // PARENT -> SERVER: Pai solicita parada de localização (novo comando)
                     const requestingParentInfoStopLoc = activeConnections.get(ws.id);
                     const targetChildIdForStopLoc = effectiveChildId;
-                    if (!requestingParentInfoStopLoc || requestingParentInfoStopStopLoc.type !== 'parent' || !targetChildIdForStopLoc) {
+                    if (!requestingParentInfoStopLoc || requestingParentInfoStopLoc.type !== 'parent' || !targetChildIdForStopLoc) { // Corrigido erro de digitação aqui: `requestingParentInfoStopStopLoc` para `requestingParentInfoStopLoc`
                         console.warn('[WS-Commands] Requisição de parada de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
                         return;
@@ -599,7 +607,7 @@ wssCommands.on('connection', ws => {
 
                     if (childWsStopLoc && childWsStopLoc.readyState === WebSocket.OPEN) {
                         childWsStopLoc.send(JSON.stringify({ type: 'stopLocationUpdates' })); // NOVO COMANDO PARA O FILHO
-                        console.log(`[Location-Server] Comando 'stopLocationUpdates' enviado para o filho ${targetChildIdForStopLoc}.`);
+                        console.log(`[Location-Server] Comando 'stopLocationUpdates' enviado para o filho ${targetChildIdForStopLoc} via WS de comandos.`);
                         ws.send(JSON.stringify({
                             type: 'locationCommandStatus',
                             status: 'stopped',
@@ -616,7 +624,6 @@ wssCommands.on('connection', ws => {
                         }));
                     }
                     break;
-                // Os outros casos (locationUpdate do filho, chatMessage, etc.) permanecem inalterados.
                 default:
                     console.warn('[WS-Commands] Tipo de mensagem desconhecido:', type);
             }
