@@ -9,15 +9,10 @@ const { v4: uuidv4 } = require('uuid');
 const url = require('url');
 
 // --- DECLARAÇÕES DE MAPS DE CONEXÃO ---
-// Mapa para armazenar todas as conexões WebSocket ativas (temporárias ou por ID)
 const wsConnections = new Map(); 
-// Mapa para mapear childId para a instância WebSocket do filho (canal de comandos)
 const childToWebSocket = new Map(); 
-// Mapa para mapear parentId para a instância WebSocket do pai (canal de comandos)
 const parentToWebSocket = new Map(); 
-// Mapa para mapear instâncias WebSocket de áudio para informações do cliente (filho ou pai)
 const activeAudioClients = new Map(); 
-// Mapa para manter todas as conexões ativas com seus IDs (temporários ou reais)
 const activeConnections = new Map(); 
 
 const app = express();
@@ -25,56 +20,47 @@ const PORT = process.env.PORT || 10000;
 
 const upload = multer();
 
-// Configuração da AWS usando variáveis de ambiente
 AWS.config.update({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
     region: process.env.AWS_REGION || 'us-east-1'
 });
 
-// Clientes DynamoDB e S3
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-// Nomes das tabelas DynamoDB
 const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; // Mantido como solicitado
+const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao'; 
 const DYNAMODB_TABLE_CHILDREN = 'Children';
 
-// Middlewares Express
-app.use(cors()); // Habilita CORS para permitir requisições de diferentes origens
-app.use(bodyParser.json()); // Habilita o parsing de JSON no corpo das requisições
+app.use(cors());
+app.use(bodyParser.json());
 
 // --- ROTAS HTTP ---
-
-// Rota de teste
 app.get('/', (req, res) => {
     res.send('Servidor Parental Monitor Online!');
 });
 
-// Rota para registrar um novo filho
 app.post('/register-child', async (req, res) => {
     const { childId, parentId, childName } = req.body;
 
-    // Validação de entrada
     if (!childId || !parentId || !childName) {
         return res.status(400).send('childId, parentId e childName são obrigatórios.');
     }
 
-    // Parâmetros para o DynamoDB
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
         Item: {
             childId: childId,
             parentId: parentId,
             childName: childName,
-            connected: false, // Inicialmente desconectado
-            lastActivity: new Date().toISOString() // Timestamp da última atividade/registro
+            connected: false,
+            lastActivity: new Date().toISOString()
         }
     };
 
     try {
-        await docClient.put(params).promise(); // Salva o item no DynamoDB
+        await docClient.put(params).promise();
         console.log(`Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
         res.status(200).send('Filho registrado com sucesso!');
     } catch (error) {
@@ -83,16 +69,14 @@ app.post('/register-child', async (req, res) => {
     }
 });
 
-// Rota para obter a lista de filhos registrados
 app.get('/get-registered-children', async (req, res) => {
     try {
         const params = {
             TableName: DYNAMODB_TABLE_CHILDREN
         };
-        const data = await docClient.scan(params).promise(); // Escaneia a tabela de filhos
+        const data = await docClient.scan(params).promise();
         console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela 'Children'. Encontrados ${data.Items.length} filhos.`);
         
-        // Adiciona o status de conexão em tempo real aos filhos
         const childrenWithStatus = data.Items.map(child => ({
             ...child,
             connected: childToWebSocket.has(child.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === child.childId && !client.isParentAudioClient)
@@ -104,25 +88,22 @@ app.get('/get-registered-children', async (req, res) => {
     }
 });
 
-// Rota para obter conversas (filhos relacionados a um pai)
 app.get('/conversations/:parentId', async (req, res) => {
     const { parentId } = req.params;
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
-        FilterExpression: 'parentId = :parentId', // Filtra por parentId
+        FilterExpression: 'parentId = :parentId',
         ExpressionAttributeValues: {
             ':parentId': parentId
         }
     };
 
     try {
-        const data = await docClient.scan(params).promise(); // Escaneia a tabela
-        // Mapeia os itens retornados para um formato de conversa
+        const data = await docClient.scan(params).promise();
         const conversations = data.Items.map(item => ({
             childId: item.childId,
             childName: item.childName,
             lastActivity: item.lastActivity,
-            // Determina o status de conexão em tempo real
             connected: childToWebSocket.has(item.childId) || Array.from(activeAudioClients.values()).some(client => client.childId === item.childId && !item.isParentAudioClient),
             parentId: item.parentId
         }));
@@ -134,20 +115,19 @@ app.get('/conversations/:parentId', async (req, res) => {
     }
 });
 
-// Rota para obter mensagens de uma conversa específica
 app.get('/messages/:conversationId', async (req, res) => {
     const { conversationId } = req.params;
     const params = {
         TableName: DYNAMODB_TABLE_MESSAGES,
-        KeyConditionExpression: 'conversationId = :conversationId', // Consulta por conversationId
+        KeyConditionExpression: 'conversationId = :conversationId',
         ExpressionAttributeValues: {
             ':conversationId': conversationId
         },
-        ScanIndexForward: true, // Ordenar por timestamp crescente
+        ScanIndexForward: true, 
     };
 
     try {
-        const data = await docClient.query(params).promise(); // Consulta a tabela de mensagens
+        const data = await docClient.query(params).promise();
         res.status(200).json(data.Items);
         console.log(`[HTTP] Mensagens para a conversa ${conversationId} retornadas.`);
     } catch (error) {
@@ -156,21 +136,20 @@ app.get('/messages/:conversationId', async (req, res) => {
     }
 });
 
-// Rota para obter localizações de um filho específico
 app.get('/locations/:childId', async (req, res) => {
     const { childId } = req.params;
     const params = {
         TableName: DYNAMODB_TABLE_LOCATIONS,
-        KeyConditionExpression: 'childId = :childId', // Consulta por childId
+        KeyConditionExpression: 'childId = :childId',
         ExpressionAttributeValues: {
             ':childId': childId
         },
-        ScanIndexForward: true, // Ordenar por timestamp crescente
-        Limit: 100 // Limita as últimas 100 localizações
+        ScanIndexForward: true, 
+        Limit: 100 
     };
 
     try {
-        const data = await docClient.query(params).promise(); // Consulta a tabela de localizações
+        const data = await docClient.query(params).promise();
         res.status(200).json(data.Items);
         console.log(`[HTTP] Localizações para o filho ${childId} retornadas.`);
     } catch (error) {
@@ -179,7 +158,6 @@ app.get('/locations/:childId', async (req, res) => {
     }
 });
 
-// Rota para simular envio de notificação (requer integração Firebase Admin)
 app.post('/send-notification', async (req, res) => {
     const { recipientChildId, title, body } = req.body;
 
@@ -194,7 +172,7 @@ app.post('/send-notification', async (req, res) => {
                 childId: recipientChildId
             }
         };
-        const data = await docClient.get(params).promise(); // Obtém o filho
+        const data = await docClient.get(params).promise();
         const child = data.Item;
 
         if (!child || !child.childToken) {
@@ -212,7 +190,6 @@ app.post('/send-notification', async (req, res) => {
     }
 });
 
-// Rota para upload de mídia para S3
 app.post('/upload-media', upload.single('media'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo enviado.');
@@ -232,11 +209,11 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         Key: key,
         Body: req.file.buffer,
         ContentType: req.file.mimetype,
-        ACL: 'private' // Define o arquivo como privado
+        ACL: 'private'
     };
 
     try {
-        const data = await s3.upload(params).promise(); // Faz o upload para o S3
+        const data = await s3.upload(params).promise();
         console.log(`[S3] Mídia ${key} (${type}) do filho ${childId} carregada com sucesso.`, data.Location);
         res.status(200).json({ url: data.Location, key: data.Key });
     } catch (error) {
@@ -245,7 +222,6 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     }
 });
 
-// Rota para download de mídia do S3
 app.get('/download-media/:key', async (req, res) => {
     const key = req.params.key;
     const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
@@ -256,45 +232,40 @@ app.get('/download-media/:key', async (req, res) => {
     };
 
     try {
-        const data = await s3.getObject(params).promise(); // Obtém o objeto do S3
-        // Define cabeçalhos para forçar o download e definir o tipo de conteúdo
+        const data = await s3.getObject(params).promise();
         res.setHeader('Content-Disposition', `attachment; filename="${key.split('/').pop()}"`);
         res.setHeader('Content-Type', data.ContentType);
-        res.send(data.Body); // Envia o corpo do arquivo
+        res.send(data.Body);
     } catch (error) {
         console.error('Erro ao baixar arquivo do S3:', error);
         res.status(404).send('Arquivo não encontrado ou erro de servidor.');
     }
 });
 
-// Rota de placeholder para token Twilio (para futura integração de chamadas/SMS)
 app.get('/twilio-token', (req, res) => {
     console.log("Requisição para Twilio token recebida. Retornando placeholder.");
     res.status(200).json({ token: 'seu_token_do_twilio_aqui' });
 });
 
-// Middleware para rotas não encontradas (404)
 app.use((req, res, next) => {
     console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
     res.status(404).send('Rota não encontrada.');
 });
 
-// Middleware de tratamento de erros global
 app.use((err, req, res, next) => {
     console.error('Erro interno do servidor:', err);
     res.status(500).send('Erro interno do servidor.');
 });
 
 // --- WEBSOCKET SERVERS ---
-const server = http.createServer(app); // Cria o servidor HTTP
-const wssCommands = new WebSocket.Server({ noServer: true }); // Servidor WebSocket para comandos (GPS, Chat)
-const wssAudio = new WebSocket.Server({ noServer: true }); // Servidor WebSocket para streaming de áudio
+const server = http.createServer(app);
+const wssCommands = new WebSocket.Server({ noServer: true });
+const wssAudio = new WebSocket.Server({ noServer: true });
 
 // WebSocket de Comandos (GPS, Chat, Comandos de Áudio/GPS)
 wssCommands.on('connection', ws => {
-    // Inicializa as variáveis de sessão para esta conexão WS
-    ws.id = uuidv4(); // ID temporário inicial
-    ws.clientType = 'unknown'; // 'parent' ou 'child'
+    ws.id = uuidv4();
+    ws.clientType = 'unknown';
     ws.currentParentId = null;
     ws.currentChildId = null;
     ws.currentChildName = null;
@@ -310,14 +281,10 @@ wssCommands.on('connection', ws => {
             
             console.log(`[WebSocket-Commands] Mensagem bruta TRIMMADA para parse: '${messageString}'`);
 
-            // --- Lógica para lidar com JSON duplamente stringificado ---
-            // Detecta se a string começa e termina com aspas literais E contém aspas escapadas internas
             if (messageString.startsWith('"') && messageString.endsWith('"') && messageString.includes('\\"')) {
                 console.log(`[WebSocket-Commands] Detectado JSON duplamente stringificado. Tentando des-stringificar.`);
                 try {
-                    // Remove as aspas externas literais
                     messageString = messageString.substring(1, messageString.length - 1);
-                    // Desescapa as aspas internas (e quaisquer outras barras invertidas duplas)
                     messageString = messageString.replace(/\\"/g, '"');
                     messageString = messageString.replace(/\\\\/g, '\\'); 
                     console.log(`[WebSocket-Commands] Mensagem des-stringificada e desescapada: '${messageString}'`);
@@ -325,7 +292,6 @@ wssCommands.on('connection', ws => {
                     console.warn(`[WebSocket-Commands] Falha na des-stringificação inicial, prosseguindo com a string original. Erro: ${e.message}`);
                 }
             }
-            // --- Fim da lógica para lidar com JSON duplamente stringificado ---
 
             finalParsedMessage = JSON.parse(messageString);
             
@@ -351,7 +317,7 @@ wssCommands.on('connection', ws => {
             let effectiveLongitude = longitude;
             let effectiveTimestamp = timestamp;
 
-            if (data) { // Se a mensagem tiver um campo 'data' (como a de áudio, por exemplo)
+            if (data) { 
                 effectiveChildId = data.childId || effectiveChildId;
                 effectiveChildName = data.childName || effectiveChildName;
                 effectiveParentId = data.parentId || effectiveParentId;
@@ -365,19 +331,15 @@ wssCommands.on('connection', ws => {
 
             switch (type) {
                 case 'parentConnect':
-                    // Define o tipo de cliente e IDs na sessão do WS
                     ws.currentParentId = effectiveParentId;
                     ws.clientType = 'parent';
 
                     if (ws.currentParentId) {
-                         // Atualiza o mapeamento global de conexões ativas
                          activeConnections.set(ws.currentParentId, { ws: ws, type: ws.clientType, id: ws.currentParentId });
-                         // Se o ID temporário for diferente do ID real, remove a entrada temporária
                          if (ws.id !== ws.currentParentId) { 
                             activeConnections.delete(ws.id); 
-                            ws.id = ws.currentParentId; // Atualiza o ID da instância WS
+                            ws.id = ws.currentParentId; 
                          }
-                         // Adiciona ou atualiza no mapa de pais
                          parentToWebSocket.set(ws.currentParentId, ws);
                          console.log(`[WebSocket-Manager] Conexão parent ${ws.currentParentId} atualizada. Total de entradas: ${activeConnections.size}`);
                          console.log(`[WS-Commands] Pai conectado e identificado: ID: ${ws.currentParentId}, ouvindo filho: ${effectiveChildId || 'nenhum'}`);
@@ -387,23 +349,18 @@ wssCommands.on('connection', ws => {
                     break;
                 case 'childConnect':
                     if (effectiveChildId && effectiveParentId) {
-                        // Define o tipo de cliente e IDs na sessão do WS
                         ws.clientType = 'child';
                         ws.currentChildId = effectiveChildId;
                         ws.currentParentId = effectiveParentId;
                         ws.currentChildName = effectiveChildName || 'Desconhecido';
                         
-                        // Atualiza o mapeamento global de conexões ativas
                         activeConnections.set(ws.currentChildId, { ws: ws, type: ws.clientType, id: ws.currentChildId, parentId: ws.currentParentId, name: ws.currentChildName });
-                        // Se o ID temporário for diferente do ID real, remove a entrada temporária
                         if (ws.id !== ws.currentChildId) { 
                             activeConnections.delete(ws.id); 
-                            ws.id = ws.currentChildId; // Atualiza o ID da instância WS
+                            ws.id = ws.currentChildId; 
                         }
-                        // Adiciona ou atualiza no mapa de filhos
                         childToWebSocket.set(ws.currentChildId, ws);
 
-                        // Atualiza o status de conexão no DynamoDB
                         await docClient.update({
                             TableName: DYNAMODB_TABLE_CHILDREN,
                             Key: { childId: ws.currentChildId },
@@ -418,7 +375,6 @@ wssCommands.on('connection', ws => {
                         console.log(`[DynamoDB] Filho ${ws.currentChildName} (${ws.currentChildId}) status de conexão atualizado para 'true'.`);
                         console.log(`[WS-Commands] Filho conectado e identificado: ID: ${ws.currentChildId}, Parent ID: ${ws.currentParentId}, Nome: ${ws.currentChildName}. Total de entradas: ${activeConnections.size}`);
                         
-                        // Notifica o pai sobre o status online do filho
                         const parentWs = parentToWebSocket.get(ws.currentParentId);
                         if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                             parentWs.send(JSON.stringify({
@@ -433,7 +389,7 @@ wssCommands.on('connection', ws => {
                         console.warn('[WS-Commands] Mensagem childConnect inválida: childId ou parentId faltando.', finalParsedMessage);
                     }
                     break;
-                case 'locationUpdate': // Recebido do filho para o servidor
+                case 'locationUpdate': 
                     const locChildId = ws.currentChildId;
                     const locParentId = ws.currentParentId;
 
@@ -443,7 +399,6 @@ wssCommands.on('connection', ws => {
                     }
                     console.log(`[Location] Localização recebida do filho ${locChildId}: Lat ${effectiveLatitude}, Lng ${effectiveLongitude}`);
 
-                    // Salva a localização no DynamoDB
                     const locationParams = {
                         TableName: DYNAMODB_TABLE_LOCATIONS,
                         Item: {
@@ -456,7 +411,6 @@ wssCommands.on('connection', ws => {
                     };
                     await docClient.put(locationParams).promise();
 
-                    // Encaminha a localização para o pai
                     const connectedParentWsLocation = parentToWebSocket.get(locParentId);
                     if (connectedParentWsLocation && connectedParentWsLocation.readyState === WebSocket.OPEN) {
                         connectedParentWsLocation.send(JSON.stringify({
@@ -469,13 +423,12 @@ wssCommands.on('connection', ws => {
                         console.log(`[Location] Localização do filho ${locChildId} encaminhada para o pai ${locParentId}.`);
                     }
                     break;
-                case 'chatMessage': // Recebido do pai ou filho para o servidor
-                    const senderId = ws.currentChildId || ws.currentParentId; // ID de quem está enviando a mensagem
-                    const receiverIdFromPayload = effectiveChildId || effectiveParentId; // ID do payload para quem é a mensagem
+                case 'chatMessage': 
+                    const senderId = ws.currentChildId || ws.currentParentId; 
+                    const receiverIdFromPayload = effectiveChildId || effectiveParentId; 
 
-                    // Encontra o WebSocket do receptor
                     const targetWsReceiver = childToWebSocket.get(receiverIdFromPayload) || parentToWebSocket.get(receiverIdFromPayload);
-                    const actualReceiverId = targetWsReceiver ? targetWsReceiver.id : receiverIdFromPayload; // Pega o ID real do WS se encontrado
+                    const actualReceiverId = targetWsReceiver ? targetWsReceiver.id : receiverIdFromPayload; 
 
                     const senderName = ws.clientType === 'child' ? ws.currentChildName : 'Pai';
 
@@ -485,14 +438,13 @@ wssCommands.on('connection', ws => {
                     }
                     console.log(`[Chat] Mensagem de ${senderName} (${senderId}) para ${receiverIdFromPayload}: ${chatMessageContent}`);
 
-                    // Salva a mensagem no DynamoDB
                     const messageParams = {
                         TableName: DYNAMODB_TABLE_MESSAGES,
                         Item: {
-                            conversationId: [ws.currentParentId, ws.currentChildId].filter(Boolean).sort().join('-'), // Ordena para consistência
+                            conversationId: [ws.currentParentId, ws.currentChildId].filter(Boolean).sort().join('-'), 
                             messageId: uuidv4(),
-                            parentId: ws.currentParentId || receiverIdFromPayload, // Pai da conversa
-                            childId: ws.currentChildId || receiverIdFromPayload, // Filho da conversa
+                            parentId: ws.currentParentId || receiverIdFromPayload, 
+                            childId: ws.currentChildId || receiverIdFromPayload, 
                             sender: senderId,
                             message: chatMessageContent,
                             timestamp: new Date().toISOString()
@@ -501,7 +453,6 @@ wssCommands.on('connection', ws => {
                     await docClient.put(messageParams).promise();
                     console.log(`[DynamoDB] Mensagem de chat salva de ${senderId} para ${receiverIdFromPayload}.`);
 
-                    // Encaminha a mensagem para o receptor, se online
                     if (targetWsReceiver && targetWsReceiver.readyState === WebSocket.OPEN) {
                         targetWsReceiver.send(JSON.stringify({
                             type: 'chatMessage',
@@ -516,9 +467,9 @@ wssCommands.on('connection', ws => {
                         console.warn(`[Chat] Receptor ${receiverIdFromPayload} não encontrado ou offline.`);
                     }
                     break;
-                case 'requestLocation': // Recebido do pai para o servidor
+                case 'requestLocation': 
                     const targetChildIdForLocation = effectiveChildId;
-                    if (ws.clientType !== 'parent' || !targetChildIdForLocation) { // Garante que é um pai enviando
+                    if (ws.clientType !== 'parent' || !targetChildIdForLocation) { 
                         console.warn('[WS-Commands] Requisição de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de localização inválida.' }));
                         return;
@@ -527,7 +478,6 @@ wssCommands.on('connection', ws => {
                     const targetChildClientWsLocation = childToWebSocket.get(targetChildIdForLocation);
                     
                     if (targetChildClientWsLocation && targetChildClientWsLocation.readyState === WebSocket.OPEN) {
-                        // Envia o comando para o filho iniciar as atualizações de localização
                         targetChildClientWsLocation.send(JSON.stringify({ type: 'startLocationUpdates' }));
                         console.log(`[Location-Server] Comando 'startLocationUpdates' enviado para filho ${targetChildIdForLocation} via WS de comandos.`);
                         ws.send(JSON.stringify({ type: 'info', message: `Solicitando localização para ${targetChildIdForLocation}.` }));
@@ -536,13 +486,13 @@ wssCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: `Filho ${targetChildIdForLocation} offline para GPS.` }));
                         return;
                     }
-                    // REMOVIDO: Comando stopAudioStreamFromServer ao iniciar GPS para separação completa
+                    // AQUI EU GARANTO QUE NADA RELACIONADO A ÁUDIO É ENVIADO.
                     break;
 
-                case 'startAudioStream': // Recebido do pai para o servidor
+                case 'startAudioStream': 
                     const targetChildIdForAudio = effectiveChildId;
                     console.log(`[Audio-Debug] Recebido 'startAudioStream' do pai ${ws.currentParentId} para filho ${targetChildIdForAudio}. ClientType: ${ws.clientType}`);
-                    if (ws.clientType !== 'parent' || !targetChildIdForAudio) { // Garante que é um pai enviando
+                    if (ws.clientType !== 'parent' || !targetChildIdForAudio) { 
                         console.warn('[WS-Commands] Requisição de áudio inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de áudio inválida.' }));
                         return;
@@ -551,7 +501,6 @@ wssCommands.on('connection', ws => {
                     const targetChildClientWsCommandsForAudio = childToWebSocket.get(targetChildIdForAudio);
 
                     if (targetChildClientWsCommandsForAudio && targetChildClientWsCommandsForAudio.readyState === WebSocket.OPEN) {
-                        // Envia o comando para o filho iniciar a gravação de áudio
                         targetChildClientWsCommandsForAudio.send(JSON.stringify({ type: 'startRecording' }));
                         console.log(`[Audio-Server] Comando 'startRecording' enviado para o filho ${targetChildIdForAudio} via WS de COMANDOS.`);
 
@@ -573,12 +522,12 @@ wssCommands.on('connection', ws => {
                         }));
                         return;
                     }
-                    // REMOVIDO: Comando stopLocationUpdates ao iniciar áudio para separação completa
+                    // AQUI EU GARANTO QUE NADA RELACIONADO A LOCALIZAÇÃO É ENVIADO.
                     break;
 
-                case 'stopAudioStream': // Recebido do pai para o servidor
+                case 'stopAudioStream': 
                     const targetChildIdForStopAudio = effectiveChildId;
-                     if (ws.clientType !== 'parent' || !targetChildIdForStopAudio) { // Garante que é um pai enviando
+                     if (ws.clientType !== 'parent' || !targetChildIdForStopAudio) { 
                         console.warn('[WS-Commands] Requisição de parada de áudio inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de áudio inválida.' }));
                         return;
@@ -586,7 +535,6 @@ wssCommands.on('connection', ws => {
                     const childWsStopAudio = childToWebSocket.get(targetChildIdForStopAudio);
 
                     if (childWsStopAudio && childWsStopAudio.readyState === WebSocket.OPEN) {
-                        // Envia o comando para o filho parar o streaming de áudio
                         childWsStopAudio.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
                         console.log(`[Audio-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForStopAudio} via WS de COMANDOS.`);
                         ws.send(JSON.stringify({
@@ -605,9 +553,9 @@ wssCommands.on('connection', ws => {
                         }));
                     }
                     break;
-                case 'stopLocationUpdates': // Recebido do pai para o servidor
+                case 'stopLocationUpdates': 
                     const targetChildIdForStopLoc = effectiveChildId;
-                     if (ws.clientType !== 'parent' || !targetChildIdForStopLoc) { // Garante que é um pai enviando
+                     if (ws.clientType !== 'parent' || !targetChildIdForStopLoc) { 
                         console.warn('[WS-Commands] Requisição de parada de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
                         return;
@@ -615,7 +563,6 @@ wssCommands.on('connection', ws => {
                     const childWsStopLoc = childToWebSocket.get(targetChildIdForStopLoc);
 
                     if (childWsStopLoc && childWsStopLoc.readyState === WebSocket.OPEN) {
-                        // Envia o comando para o filho parar as atualizações de localização
                         childWsStopLoc.send(JSON.stringify({ type: 'stopLocationUpdates' }));
                         console.log(`[Location-Server] Comando 'stopLocationUpdates' enviado para o filho ${targetChildIdForStopLoc} via WS de comandos.`);
                         ws.send(JSON.stringify({
@@ -650,7 +597,6 @@ wssCommands.on('connection', ws => {
         
         const disconnectedId = ws.id;
         
-        // Remove a conexão dos mapas
         activeConnections.delete(disconnectedId);
         if (ws.clientType === 'child' && ws.currentChildId) {
             childToWebSocket.delete(ws.currentChildId);
@@ -660,7 +606,6 @@ wssCommands.on('connection', ws => {
 
         if (ws.clientType === 'child' && ws.currentChildId) {
             try {
-                // Atualiza o status de conexão do filho no DynamoDB para 'false'
                 await docClient.update({
                     TableName: DYNAMODB_TABLE_CHILDREN,
                     Key: { childId: ws.currentChildId },
@@ -669,7 +614,6 @@ wssCommands.on('connection', ws => {
                 }).promise();
                 console.log(`[DynamoDB] Filho ${ws.currentChildId} status de conexão atualizado para 'false'.`);
 
-                // Notifica o pai sobre o status offline do filho
                 const parentWs = parentToWebSocket.get(ws.currentParentId);
                 if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                     parentWs.send(JSON.stringify({
@@ -696,36 +640,25 @@ wssCommands.on('connection', ws => {
     });
 });
 
-// Função auxiliar para encontrar a conexão de áudio do filho (se existir)
-// Nota: Esta função não é mais usada para parar um recurso ao iniciar outro
-function findAudioWsForChild(childId) {
-    for (const [wsInstance, clientInfo] of activeAudioClients.entries()) {
-        if (clientInfo.childId === childId && !clientInfo.isParentAudioClient) {
-            return wsInstance;
-        }
-    }
-    return null;
-}
+// REMOVIDO: findAudioWsForChild function, pois não é mais necessária para interrupções cruzadas.
+// Esta função só seria necessária se houvesse uma lógica de interrupção entre os canais, que foi removida.
 
 // WebSocket Server para Áudio
 wssAudio.on('connection', (ws, req) => {
-    // Extrai parâmetros childId e parentId da URL de conexão (query string)
     const parameters = url.parse(req.url, true).query;
     const childId = parameters.childId;
     const parentId = parameters.parentId;
 
     if (!childId) {
         console.error("[Audio-WS] Conexão de áudio rejeitada: childId ausente nos parâmetros da URL.");
-        ws.close(); // Fecha a conexão se o childId não for fornecido
+        ws.close();
         return;
     }
 
-    // Armazena as informações diretamente na instância do WebSocket para acesso posterior
     ws.childId = childId;
-    ws.parentId = parentId; 
-    ws.isParentAudioClient = false; // Flag para identificar o tipo de cliente de áudio (aqui é o filho)
+    ws.parentId = parentId;
+    ws.isParentAudioClient = false;
 
-    // Adiciona a conexão ao mapa de clientes de áudio ativos
     activeAudioClients.set(ws, { childId: ws.childId, parentId: ws.parentId, isParentAudioClient: ws.isParentAudioClient });
     console.log(`[Audio-WS] Filho ${ws.childId} conectado ao WebSocket de áudio. Parent: ${ws.parentId}. Total de conexões de áudio: ${activeAudioClients.size}`);
 
@@ -733,33 +666,28 @@ wssAudio.on('connection', (ws, req) => {
         try {
             const messageString = Buffer.isBuffer(message) ? message.toString('utf8') : message;
             
-            // Tenta parsear como JSON (para mensagens de controle ou audioData formatado JSON)
-            // O cliente Android deve enviar os dados de áudio em JSON com 'type: "audioData"'
             if (messageString.startsWith('{') && messageString.endsWith('}')) {
                 const parsedAudioData = JSON.parse(messageString);
                 if (parsedAudioData.type === 'audioData' && parsedAudioData.data) {
                     const audioBase64 = parsedAudioData.data;
                     
-                    // Prepara o JSON para encaminhar ao pai
                     const audioDataJson = JSON.stringify({
                         type: 'audioData',
-                        childId: parsedAudioData.childId || ws.childId, // Usa o childId do payload ou da sessão do WS
+                        childId: parsedAudioData.childId || ws.childId,
                         data: audioBase64
                     });
 
-                    // Encaminha os dados de áudio para todos os pais conectados
                     parentToWebSocket.forEach((parentWs, pId) => {
                         if (parentWs.readyState === WebSocket.OPEN) {
                             parentWs.send(audioDataJson);
                         }
                     });
-                    // console.log(`[Audio-WS] Recebido chunk de áudio JSON do filho ${parsedAudioData.childId || ws.childId}. Tamanho JSON: ${audioDataJson.length}. Encaminhando.`);
                 } else {
                     console.log(`[Audio-WS] Recebida mensagem de controle (não áudio) do filho ${ws.childId}:`, parsedAudioData);
                 }
-            } else { // Fallback: Tratar como buffer bruto (menos provável com o Android atual)
+            } else { 
                 console.warn(`[Audio-WS] Recebido mensagem não JSON no canal de áudio do filho ${ws.childId}. Tratando como buffer bruto.`);
-                const audioBase64 = Buffer.from(message).toString('base64'); // Converte o buffer diretamente
+                const audioBase64 = Buffer.from(message).toString('base64');
                 const audioDataJson = JSON.stringify({
                     type: 'audioData',
                     childId: ws.childId,
@@ -780,17 +708,16 @@ wssAudio.on('connection', (ws, req) => {
 
     ws.on('close', (code, reason) => {
         console.log(`[Audio-WS] Filho ${ws.childId} desconectado do WebSocket de áudio. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
-        activeAudioClients.delete(ws); // Remove a conexão do mapa
+        activeAudioClients.delete(ws);
         console.log(`[Audio-WS] Conexão de áudio de ${ws.childId} removida. Total: ${activeAudioClients.size}`);
     });
 
     ws.on('error', error => {
         console.error(`[Audio-WS] Erro no WebSocket de áudio para ${ws.childId}:`, error);
-        activeAudioClients.delete(ws); // Remove a conexão em caso de erro
+        activeAudioClients.delete(ws);
     });
 });
 
-// Função auxiliar para atualizar o status de conexão de um filho no DynamoDB
 async function updateChildConnectionStatus(childId, connected) {
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
@@ -809,8 +736,6 @@ async function updateChildConnectionStatus(childId, connected) {
     }
 }
 
-// Lidar com upgrade de HTTP para WebSocket
-// Redireciona a conexão para o servidor WebSocket apropriado com base no pathname
 server.on('upgrade', (request, socket, head) => {
     const { pathname } = url.parse(request.url);
     console.log(`[HTTP-Upgrade] Tentativa de upgrade para pathname: ${pathname}`);
@@ -824,7 +749,7 @@ server.on('upgrade', (request, socket, head) => {
             wssAudio.emit('connection', ws, request); 
         });
     } else {
-        socket.destroy(); // Destrói o socket se o pathname não for reconhecido
+        socket.destroy(); 
     }
 });
 
