@@ -109,7 +109,8 @@ app.get('/conversations/:parentId', async (req, res) => {
         }));
         res.status(200).json(conversations);
         console.log(`[HTTP] Conversas para o pai ${parentId} retornadas.`);
-    } catch (error) {
+    }
+    catch (error) {
         console.error('Erro ao obter conversas:', error);
         res.status(500).send('Erro ao obter conversas.');
     }
@@ -265,7 +266,7 @@ const wssAudio = new WebSocket.Server({ noServer: true });
 // WebSocket de Comandos (GPS, Chat, Comandos de Áudio/GPS)
 wssCommands.on('connection', ws => {
     ws.id = uuidv4();
-    ws.clientType = 'unknown';
+    ws.clientType = 'unknown'; // Estado inicial
     ws.currentParentId = null;
     ws.currentChildId = null;
     ws.currentChildName = null;
@@ -332,17 +333,21 @@ wssCommands.on('connection', ws => {
             switch (type) {
                 case 'parentConnect':
                     ws.currentParentId = effectiveParentId;
-                    ws.clientType = 'parent';
+                    ws.clientType = 'parent'; // Define o tipo de cliente como 'parent'
 
                     if (ws.currentParentId) {
                          activeConnections.set(ws.currentParentId, { ws: ws, type: ws.clientType, id: ws.currentParentId });
                          if (ws.id !== ws.currentParentId) { 
                             activeConnections.delete(ws.id); 
-                            ws.id = ws.currentParentId; 
+                            ws.id = ws.currentParentId; // Atualiza o ID da instância WS para o ID real do pai
                          }
                          parentToWebSocket.set(ws.currentParentId, ws);
                          console.log(`[WebSocket-Manager] Conexão parent ${ws.currentParentId} atualizada. Total de entradas: ${activeConnections.size}`);
                          console.log(`[WS-Commands] Pai conectado e identificado: ID: ${ws.currentParentId}, ouvindo filho: ${effectiveChildId || 'nenhum'}`);
+                         ws.send(JSON.stringify({ type: 'parentConnectedSuccess', parentId: ws.currentParentId }));
+                         // --- NOVO LOG ---
+                         console.log(`[WS-Commands-DEBUG] APÓS parentConnect: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                         // --- FIM NOVO LOG ---
                     } else {
                          console.warn('[WS-Commands] parentConnect sem parentId.');
                     }
@@ -469,6 +474,9 @@ wssCommands.on('connection', ws => {
                     break;
                 case 'requestLocation': 
                     const targetChildIdForLocation = effectiveChildId;
+                    // --- NOVO LOG ---
+                    console.log(`[WS-Commands-DEBUG] ANTES requestLocation check: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                    // --- FIM NOVO LOG ---
                     if (ws.clientType !== 'parent' || !targetChildIdForLocation) { 
                         console.warn('[WS-Commands] Requisição de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de localização inválida.' }));
@@ -486,11 +494,13 @@ wssCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: `Filho ${targetChildIdForLocation} offline para GPS.` }));
                         return;
                     }
-                    // AQUI EU GARANTO QUE NADA RELACIONADO A ÁUDIO É ENVIADO.
                     break;
 
                 case 'startAudioStream': 
                     const targetChildIdForAudio = effectiveChildId;
+                    // --- NOVO LOG ---
+                    console.log(`[WS-Commands-DEBUG] ANTES startAudioStream check: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                    // --- FIM NOVO LOG ---
                     console.log(`[Audio-Debug] Recebido 'startAudioStream' do pai ${ws.currentParentId} para filho ${targetChildIdForAudio}. ClientType: ${ws.clientType}`);
                     if (ws.clientType !== 'parent' || !targetChildIdForAudio) { 
                         console.warn('[WS-Commands] Requisição de áudio inválida: não é pai ou childId ausente.');
@@ -522,11 +532,13 @@ wssCommands.on('connection', ws => {
                         }));
                         return;
                     }
-                    // AQUI EU GARANTO QUE NADA RELACIONADO A LOCALIZAÇÃO É ENVIADO.
                     break;
 
                 case 'stopAudioStream': 
                     const targetChildIdForStopAudio = effectiveChildId;
+                    // --- NOVO LOG ---
+                    console.log(`[WS-Commands-DEBUG] ANTES stopAudioStream check: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                    // --- FIM NOVO LOG ---
                      if (ws.clientType !== 'parent' || !targetChildIdForStopAudio) { 
                         console.warn('[WS-Commands] Requisição de parada de áudio inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de áudio inválida.' }));
@@ -555,6 +567,9 @@ wssCommands.on('connection', ws => {
                     break;
                 case 'stopLocationUpdates': 
                     const targetChildIdForStopLoc = effectiveChildId;
+                    // --- NOVO LOG ---
+                    console.log(`[WS-Commands-DEBUG] ANTES stopLocationUpdates check: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                    // --- FIM NOVO LOG ---
                      if (ws.clientType !== 'parent' || !targetChildIdForStopLoc) { 
                         console.warn('[WS-Commands] Requisição de parada de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
@@ -639,9 +654,6 @@ wssCommands.on('connection', ws => {
         console.error('[WS-Commands] Erro no cliente WebSocket:', error);
     });
 });
-
-// REMOVIDO: findAudioWsForChild function, pois não é mais necessária para interrupções cruzadas.
-// Esta função só seria necessária se houvesse uma lógica de interrupção entre os canais, que foi removida.
 
 // WebSocket Server para Áudio
 wssAudio.on('connection', (ws, req) => {
