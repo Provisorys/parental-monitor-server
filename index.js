@@ -631,7 +631,7 @@ wssAudioControl.on('connection', ws => {
                 ws.currentChildId = effectiveChildId;
                 ws.currentParentId = effectiveParentId;
                 activeAudioControlClients.set(effectiveChildId, ws); // Mapeia o childId para o WebSocket DE CONTROLE DE ÁUDIO
-                console.log(`[WS-AUDIO-CONTROL-CONN] Filho ${effectiveChildId} identificado para controle de áudio. Parent: ${effectiveParentId}. Adicionado ao mapa activeAudioControlClients. Tamanho do mapa: ${activeAudioControlClients.size}`);
+                console.log(`[WS-AUDIO-CONTROL-CONN] Filho ${effectiveChildId} identificado para controle de áudio. Parent: ${effectiveParentId}`);
                 return; // Já processou a mensagem de conexão
             }
 
@@ -662,7 +662,7 @@ wssAudioControl.on('connection', ws => {
                     if (childAudioControlWs && childAudioControlWs.readyState === WebSocket.OPEN) {
                         // === CORREÇÃO: ENVIAR PARA O WS DO CANAL DE CONTROLE DE ÁUDIO DO FILHO ===
                         childAudioControlWs.send(JSON.stringify({ type: 'startRecording' }));
-                        console.log(`[Audio-Control-Server] Comando 'startRecording' enviado para filho ${targetChildIdForAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.log(`[Audio-Control-Server] Comando 'startRecording' enviado para filho ${targetChildIdForAudio} via WS de CONTROLE DE ÁUDIO.`);
 
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
@@ -671,7 +671,7 @@ wssAudioControl.on('connection', ws => {
                             message: `Comando 'startRecording' enviado para ${targetChildIdForAudio}.`
                         }));
                     } else {
-                        console.warn(`[Audio-Control-Server] Filho ${targetChildIdForAudio} NÃO ENCONTRADO ou offline no canal de CONTROLE DE ÁUDIO para comando de áudio. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.warn(`[Audio-Control-Server] Filho ${targetChildIdForAudio} NÃO ENCONTRADO ou offline no canal de CONTROLE DE ÁUDIO para comando de áudio.`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'childOffline',
@@ -695,7 +695,7 @@ wssAudioControl.on('connection', ws => {
                     if (childAudioControlWsStop && childAudioControlWsStop.readyState === WebSocket.OPEN) {
                         // === CORREÇÃO: ENVIAR PARA O WS DO CANAL DE CONTROLE DE ÁUDIO DO FILHO ===
                         childAudioControlWsStop.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
-                        console.log(`[Audio-Control-Server] Comando 'stopAudioStreamFromServer' enviado para o o filho ${targetChildIdForStopAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.log(`[Audio-Control-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForStopAudio} via WS de CONTROLE DE ÁUDIO.`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'stopped',
@@ -703,7 +703,7 @@ wssAudioControl.on('connection', ws => {
                             message: `Comando 'stopAudioStreamFromServer' enviado para ${targetChildIdForStopAudio}.`
                         }));
                     } else {
-                        console.warn(`[Audio-Control-Server] Filho ${targetChildIdForStopAudio} não encontrado ou offline no canal de CONTROLE DE ÁUDIO para comando de parada de áudio. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.warn(`[Audio-Control-Server] Filho ${targetChildIdForStopAudio} não encontrado ou offline no canal de CONTROLE DE ÁUDIO para comando de parada de áudio.`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'childOffline',
@@ -739,7 +739,7 @@ wssAudioControl.on('connection', ws => {
         // Remove a conexão do mapa de controle de áudio se for um filho
         if (ws.clientType === 'child-audio-control' && ws.currentChildId) {
             activeAudioControlClients.delete(ws.currentChildId);
-            console.log(`[WS-AUDIO-CONTROL-CLOSE] Cliente de controle de áudio do filho ${ws.currentChildId} removido. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+            console.log(`[WS-AUDIO-CONTROL-CLOSE] Cliente de controle de áudio do filho ${ws.currentChildId} removido.`);
         }
         // Remove a conexão do mapa geral de conexões
         activeConnections.delete(ws.id);
@@ -751,7 +751,7 @@ wssAudioControl.on('connection', ws => {
         // Garante que a conexão seja removida em caso de erro
         if (ws.clientType === 'child-audio-control' && ws.currentChildId) {
             activeAudioControlClients.delete(ws.currentChildId);
-            console.log(`[WS-AUDIO-CONTROL-ERROR] Cliente de controle de áudio do filho ${ws.currentChildId} removido devido a erro. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+            console.log(`[WS-AUDIO-CONTROL-ERROR] Cliente de controle de áudio do filho ${ws.currentChildId} removido devido a erro.`);
         }
         activeConnections.delete(ws.id);
     });
@@ -817,8 +817,7 @@ wssAudioData.on('connection', (ws, req) => {
                 const parentWs = parentToWebSocket.get(parentId); // Encaminha para o pai no CANAL DE COMANDOS GERAIS
                 if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                     parentWs.send(JSON.stringify(parsedAudioData));
-                    // === DESCOMENTADO PARA DEBUG: Ver se o servidor está encaminhando ===
-                    console.log(`[WS-AUDIO-DATA-FORWARD] Encaminhando dados de áudio de ChildId=${childId} para Pai=${parentId} (via WS-General). Tamanho do dado: ${parsedAudioData.data.length}`);
+                    // console.log(`[WS-AUDIO-DATA-FORWARD] Encaminhando dados de áudio de ChildId=${childId} para Pai=${parentId} (via WS-General).`);
                 } else {
                     console.warn(`[WS-AUDIO-DATA-FORWARD] Pai ${parentId} não encontrado ou offline para receber dados de áudio de ${childId}.`);
                     // Opcional: Armazenar áudio em S3 se o pai estiver offline
