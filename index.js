@@ -546,12 +546,8 @@ wssGeneralCommands.on('connection', ws => {
 // WebSocket Server para CONTROLE DE ÁUDIO (parent -> server, server -> child)
 wssAudioControl.on('connection', ws => {
     ws.id = uuidv4();
-    ws.clientType = 'unknown'; // Este canal também pode receber parentConnect/childConnect para controle?
-    // Não, a identificação principal deve ocorrer no wssGeneralCommands.
-    // Vamos usar as informações de ws.clientType e ws.currentParentId/ChildId
-    // que devem ter sido estabelecidas em wssGeneralCommands para a mesma conexão de ID.
-    // Embora não haja um parentToWebSocket para este canal, ele precisa consultar childToWebSocket
-    // que é preenchido pelo wssGeneralCommands.
+    ws.clientType = 'unknown'; 
+    ws.currentParentId = null; 
 
     console.log(`[WS-AUDIO-CONTROL-CONN] Nova conexão WS de controle de áudio: ID=${ws.id}, Estado inicial: clientType=${ws.clientType}, currentParentId=${ws.currentParentId}`);
     activeConnections.set(ws.id, { ws: ws, type: ws.clientType, id: ws.id }); // Adiciona à lista de conexões ativas gerais
@@ -583,18 +579,13 @@ wssAudioControl.on('connection', ws => {
                 effectiveParentId = data.parentId || effectiveParentId;
             }
             
-            // --- Para o canal de controle de áudio, a identificação do cliente já deve ter ocorrido no canal general.
+            // Para o canal de controle de áudio, a identificação do cliente já deve ter ocorrido no canal geral.
             // Precisamos encontrar a conexão geral para verificar o clientType.
-            // Uma forma mais robusta seria ter um ID de sessão compartilhado ou mapear o ID temporário do WS.
-            // Por simplicidade, vamos assumir que o 'parentId' ou 'childId' no payload já é suficiente
-            // se o cliente *também* se identificou no canal general.
-            // Para comandos de PARENT, o 'parentId' do payload deve coincidir com o 'currentParentId' da conexão general.
             const parentGeneralWs = parentToWebSocket.get(effectiveParentId);
             if (parentGeneralWs) {
-                ws.clientType = parentGeneralWs.clientType; // Sync clientType from general connection
-                ws.currentParentId = parentGeneralWs.currentParentId; // Sync currentParentId
+                ws.clientType = parentGeneralWs.clientType; // Sincroniza clientType da conexão geral
+                ws.currentParentId = parentGeneralWs.currentParentId; // Sincroniza currentParentId
             }
-            // Similar para child, se o filho estiver enviando um comando de controle de áudio (o que não deve acontecer)
 
 
             console.log(`[WS-AudioControl] Desestruturado - type: ${type}, parentId: ${effectiveParentId}, childId (effective): ${effectiveChildId}`);
