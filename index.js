@@ -632,11 +632,9 @@ wssAudioControl.on('connection', ws => {
                 ws.currentParentId = effectiveParentId;
                 activeAudioControlClients.set(effectiveChildId, ws); // Mapeia o childId para o WebSocket DE CONTROLE DE ÁUDIO
                 console.log(`[WS-AUDIO-CONTROL-CONN] Filho ${effectiveChildId} identificado para controle de áudio. Parent: ${effectiveParentId}. Adicionado ao mapa activeAudioControlClients. Tamanho do mapa: ${activeAudioControlClients.size}`);
-                return; // Já processou a mensagem de conexão
-            }
-
-            // Se a mensagem não é 'childConnectAudioControl', assume que é um pai enviando comando
-            if (ws.clientType === 'unknown' && effectiveParentId) { 
+                // Removido o 'return' para permitir que outras lógicas de identificação/processamento de mensagem aconteçam, se necessário
+                // embora para 'childConnectAudioControl' ele normalmente seria o único processamento.
+            } else if (ws.clientType === 'unknown' && effectiveParentId) { // Se a mensagem não é 'childConnectAudioControl', e o tipo é 'unknown', assume que é um pai enviando comando
                 ws.clientType = 'parent';
                 ws.currentParentId = effectiveParentId;
                 // Não adicionamos ao parentToWebSocket aqui, ele já está no wssGeneralCommands
@@ -645,7 +643,6 @@ wssAudioControl.on('connection', ws => {
 
             console.log(`[WS-AudioControl] Desestruturado - type: ${type}, parentId: ${effectiveParentId}, childId (effective): ${effectiveChildId}`);
             console.log(`[WS-AudioControl-DEBUG] Estado da conexão que enviou: clientType=${ws.clientType}, currentParentId=${ws.currentParentId}, ID=${ws.id}`);
-
 
             switch (type) {
                 case 'startAudioStream': // Recebido do pai no canal de controle
@@ -656,13 +653,11 @@ wssAudioControl.on('connection', ws => {
                         return;
                     }
                     
-                    // === AQUI ESTÁ A MUDANÇA CRÍTICA: BUSCA NO MAP 'activeAudioControlClients' ===
                     const childAudioControlWs = activeAudioControlClients.get(targetChildIdForAudio);
 
                     if (childAudioControlWs && childAudioControlWs.readyState === WebSocket.OPEN) {
-                        // === CORREÇÃO: ENVIAR PARA O WS DO CANAL DE CONTROLE DE ÁUDIO DO FILHO ===
                         childAudioControlWs.send(JSON.stringify({ type: 'startRecording' }));
-                        console.log(`[Audio-Control-Server] Comando 'startRecording' enviado para filho ${targetChildIdForAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.log(`[Audio-Control-Server] Comando 'startRecording' ENVIADO para filho ${targetChildIdForAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
 
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
@@ -672,6 +667,11 @@ wssAudioControl.on('connection', ws => {
                         }));
                     } else {
                         console.warn(`[Audio-Control-Server] Filho ${targetChildIdForAudio} NÃO ENCONTRADO ou offline no canal de CONTROLE DE ÁUDIO para comando de áudio. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        // NOVO LOG: para depurar porque o cliente não está no mapa
+                        if (!activeAudioControlClients.has(targetChildIdForAudio)) {
+                            console.warn(`[Audio-Control-Server-DEBUG] Child ID ${targetChildIdForAudio} não está no mapa activeAudioControlClients.`);
+                            console.warn(`[Audio-Control-Server-DEBUG] Conteúdo atual de activeAudioControlClients: ${Array.from(activeAudioControlClients.keys()).join(', ')}`);
+                        }
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'childOffline',
@@ -689,13 +689,11 @@ wssAudioControl.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de áudio inválida: cliente não identificado ou childId ausente.' }));
                         return;
                     }
-                    // === AQUI ESTÁ A MUDANÇA CRÍTICA: BUSCA NO MAP 'activeAudioControlClients' ===
                     const childAudioControlWsStop = activeAudioControlClients.get(targetChildIdForStopAudio);
 
                     if (childAudioControlWsStop && childAudioControlWsStop.readyState === WebSocket.OPEN) {
-                        // === CORREÇÃO: ENVIAR PARA O WS DO CANAL DE CONTROLE DE ÁUDIO DO FILHO ===
                         childAudioControlWsStop.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
-                        console.log(`[Audio-Control-Server] Comando 'stopAudioStreamFromServer' enviado para o o filho ${targetChildIdForStopAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.log(`[Audio-Control-Server] Comando 'stopAudioStreamFromServer' ENVIADO para o o filho ${targetChildIdForStopAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'stopped',
@@ -703,7 +701,12 @@ wssAudioControl.on('connection', ws => {
                             message: `Comando 'stopAudioStreamFromServer' enviado para ${targetChildIdForStopAudio}.`
                         }));
                     } else {
-                        console.warn(`[Audio-Control-Server] Filho ${targetChildIdForStopAudio} não encontrado ou offline no canal de CONTROLE DE ÁUDIO para comando de parada de áudio. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.warn(`[Audio-Control-Server] Filho ${targetChildIdForStopAudio} NÃO ENCONTRADO ou offline no canal de CONTROLE DE ÁUDIO para comando de parada de áudio. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        // NOVO LOG: para depurar porque o cliente não está no mapa
+                        if (!activeAudioControlClients.has(targetChildIdForStopAudio)) {
+                            console.warn(`[Audio-Control-Server-DEBUG] Child ID ${targetChildIdForStopAudio} não está no mapa activeAudioControlClients.`);
+                            console.warn(`[Audio-Control-Server-DEBUG] Conteúdo atual de activeAudioControlClients: ${Array.from(activeAudioControlClients.keys()).join(', ')}`);
+                        }
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'childOffline',
@@ -712,7 +715,6 @@ wssAudioControl.on('connection', ws => {
                         }));
                     }
                     break;
-                // Mensagens que deveriam vir apenas do servidor para o filho (ou não são esperadas aqui)
                 case 'startRecording': 
                 case 'stopAudioStreamFromServer': 
                     console.warn(`[WebSocket-AudioControl] Mensagem de tipo ${type} recebida de CLIENTE inesperado. Este tipo de mensagem é para SERVER->CHILD.`);
