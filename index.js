@@ -695,7 +695,7 @@ wssAudioControl.on('connection', ws => {
                     if (childAudioControlWsStop && childAudioControlWsStop.readyState === WebSocket.OPEN) {
                         // === CORREÇÃO: ENVIAR PARA O WS DO CANAL DE CONTROLE DE ÁUDIO DO FILHO ===
                         childAudioControlWsStop.send(JSON.stringify({ type: 'stopAudioStreamFromServer' }));
-                        console.log(`[Audio-Control-Server] Comando 'stopAudioStreamFromServer' enviado para o filho ${targetChildIdForStopAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
+                        console.log(`[Audio-Control-Server] Comando 'stopAudioStreamFromServer' enviado para o o filho ${targetChildIdForStopAudio} via WS de CONTROLE DE ÁUDIO. Tamanho do mapa activeAudioControlClients: ${activeAudioControlClients.size}`);
                         ws.send(JSON.stringify({
                             type: 'audioCommandStatus',
                             status: 'stopped',
@@ -817,7 +817,8 @@ wssAudioData.on('connection', (ws, req) => {
                 const parentWs = parentToWebSocket.get(parentId); // Encaminha para o pai no CANAL DE COMANDOS GERAIS
                 if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                     parentWs.send(JSON.stringify(parsedAudioData));
-                    // console.log(`[WS-AUDIO-DATA-FORWARD] Encaminhando dados de áudio de ChildId=${childId} para Pai=${parentId} (via WS-General).`);
+                    // === DESCOMENTADO PARA DEBUG: Ver se o servidor está encaminhando ===
+                    console.log(`[WS-AUDIO-DATA-FORWARD] Encaminhando dados de áudio de ChildId=${childId} para Pai=${parentId} (via WS-General). Tamanho do dado: ${parsedAudioData.data.length}`);
                 } else {
                     console.warn(`[WS-AUDIO-DATA-FORWARD] Pai ${parentId} não encontrado ou offline para receber dados de áudio de ${childId}.`);
                     // Opcional: Armazenar áudio em S3 se o pai estiver offline
