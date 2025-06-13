@@ -602,13 +602,14 @@ wssAudioControl.on('connection', ws => {
 
             console.log('[WebSocket-AudioControl] Mensagem JSON recebida:', finalParsedMessage);
 
-            const { type, parentId, childId, data } = finalParsedMessage;
+            const { type, parentId, childId, data } = finalParsedMessage; // 'data' aqui é o campo do JSON
             
             let effectiveChildId = childId;
             let effectiveParentId = parentId;
 
             // Ajuste para extrair childId e parentId do objeto 'data' se presentes
-            if (data) { 
+            // (Isso lida com mensagens onde childId/parentId podem estar em 'data' ou na raiz)
+            if (data && typeof data === 'object') { // Verifique se 'data' é um objeto antes de tentar acessar suas propriedades
                 effectiveChildId = data.childId || effectiveChildId;
                 effectiveParentId = data.parentId || effectiveParentId;
             }
@@ -701,9 +702,9 @@ wssAudioControl.on('connection', ws => {
                     break;
                 
                 case 'audioData': // NOVO: Lidar com dados de áudio do filho neste canal
-                    const audioDataChildId = effectiveChildId;
-                    const audioDataParentId = effectiveParentId; // Pode vir do connect message ou do payload
-                    const audioBase64 = data?.data; // O Base64 está na propriedade 'data' dentro do 'data'
+                    const audioDataChildId = childId; // childId é do nível superior
+                    const audioDataParentId = parentId; // parentId é do nível superior
+                    const audioBase64 = data; // AQUI ESTÁ A CORREÇÃO: Pega 'data' DIRETAMENTE, não 'data.data'
 
                     if (!audioDataChildId || !audioBase64 || !audioDataParentId) {
                         console.warn('[WS-AudioControl] Mensagem audioData inválida: childId, parentId ou dados Base64 ausentes.');
