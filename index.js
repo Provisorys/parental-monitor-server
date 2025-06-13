@@ -15,10 +15,9 @@ const wsConnections = new Map();
 const childToWebSocket = new Map(); 
 // Mapeia parentId para a instância WebSocket do pai no canal de COMANDOS GERAIS
 const parentToWebSocket = new Map(); 
-// Mapeia instâncias WebSocket de áudio de DADOS para informações do cliente (filho para servidor)
-const activeAudioDataClients = new Map();
-// NOVO MAPA: Mapeia childId para a instância WebSocket do filho no canal de CONTROLE DE ÁUDIO (servidor para filho)
-const activeAudioControlClients = new Map();
+// Mapeia childId para a instância WebSocket do filho no canal de CONTROLE E DADOS DE ÁUDIO (servidor para filho e filho para servidor)
+const activeAudioControlClients = new Map(); // Agora também handle dados de áudio
+
 // Mapa para manter todas as conexões ativas com seus IDs (temporários ou reais)
 const activeConnections = new Map(); 
 
@@ -199,21 +198,6 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     }
 });
 
-app.get('/download-media/:key', async (req, res) => {
-    const key = req.params.key;
-    const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
-    const params = { Bucket: bucketName, Key: key };
-    try {
-        const data = await s3.getObject(params).promise();
-        res.setHeader('Content-Disposition', `attachment; filename="${key.split('/').pop()}"`);
-        res.setHeader('Content-Type', data.ContentType);
-        res.send(data.Body);
-    } catch (error) {
-        console.error('Erro ao baixar arquivo do S3:', error);
-        res.status(404).send('Arquivo não encontrado ou erro de servidor.');
-    }
-});
-
 app.get('/twilio-token', (req, res) => {
     console.log("Requisição para Twilio token recebida. Retornando placeholder.");
     res.status(200).json({ token: 'seu_token_do_twilio_aqui' });
@@ -233,9 +217,7 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app); 
 // Canal para comandos gerais, GPS, Chat, Status de Conexão
 const wssGeneralCommands = new WebSocket.Server({ noServer: true }); 
-// Canal para streaming de DADOS de áudio (do filho)
-const wssAudioData = new WebSocket.Server({ noServer: true }); 
-// Canal para comandos de controle de áudio (ex: startRecording, stopAudioStreamFromServer)
+// Canal para comandos de controle de áudio (ex: startRecording, stopAudioStreamFromServer) E AGORA TAMBÉM DADOS DE ÁUDIO
 const wssAudioControl = new WebSocket.Server({ noServer: true }); 
 
 // Função para atualizar o status de conexão no DynamoDB
@@ -262,15 +244,11 @@ server.on('upgrade', (request, socket, head) => {
     const { pathname } = url.parse(request.url);
     console.log(`[HTTP-Upgrade] Tentativa de upgrade para pathname: ${pathname}`);
 
-    if (pathname === '/ws-general-commands') { // Novo canal para comandos gerais
+    if (pathname === '/ws-general-commands') { // Canal para comandos gerais
         wssGeneralCommands.handleUpgrade(request, socket, head, ws => {
             wssGeneralCommands.emit('connection', ws, request);
         });
-    } else if (pathname === '/ws-audio-data') { // Canal para dados de áudio
-        wssAudioData.handleUpgrade(request, socket, head, ws => {
-            wssAudioData.emit('connection', ws, request); 
-        });
-    } else if (pathname === '/ws-audio-control') { // NOVO canal para controle de áudio
+    } else if (pathname === '/ws-audio-control') { // Canal para controle e dados de áudio (AGORA CONSOLIDADO)
         wssAudioControl.handleUpgrade(request, socket, head, ws => {
             wssAudioControl.emit('connection', ws, request);
         });
@@ -527,6 +505,16 @@ wssGeneralCommands.on('connection', ws => {
                         }));
                     }
                     break;
+                case 'audioData': // Este case DEVE RECEBER APENAS mensagens de áudio ENCAMINHADAS do canal de áudio.
+                    // Se o servidor for encaminhar audioData de outro canal para cá, ele é tratado aqui.
+                    // Se o filho enviar audioData diretamente para este canal, isso é um erro no filho.
+                    console.warn(`[WS-General] Mensagem 'audioData' recebida inesperadamente NESTE CANAL. Isso deve ser enviado pelo canal de ÁUDIO. Encaminhando para o pai se for o caso.`);
+                    // A lógica de encaminhamento de áudio para o pai está agora no wssAudioControl
+                    // Se você não tiver um mecanismo para o wssAudioControl encaminhar para o parentToWebSocket.get(parentId) aqui,
+                    // esta é uma oportunidade para garantir que o áudio chegue ao pai.
+                    // A linha abaixo já faz isso, então não precisamos de um 'case audioData' aqui no wssGeneralCommands
+                    // a menos que você queira que o filho ENVIE audioData direto para cá, o que NÃO É o plano de consolidação.
+                    break;
                 default:
                     console.warn('[WebSocket-General] Tipo de mensagem desconhecido:', type);
             }
@@ -587,7 +575,7 @@ wssGeneralCommands.on('connection', ws => {
     });
 });
 
-// WebSocket Server para CONTROLE DE ÁUDIO (parent -> server, server -> child)
+// WebSocket Server para CONTROLE DE ÁUDIO (parent -> server, server -> child) E AGORA TAMBÉM DADOS DE ÁUDIO (child -> server)
 wssAudioControl.on('connection', ws => {
     ws.id = uuidv4();
     ws.clientType = 'unknown'; 
@@ -675,20 +663,14 @@ wssAudioControl.on('connection', ws => {
                     break;
 
                 case 'stopAudioStream': 
-                    // Correção: Extrai childId do objeto 'data'
-                    const stopChildId = data?.childId || effectiveChildId; // Prioriza 'data.childId', fallback para 'childId' se não houver 'data'
+                    // Extrai childId do objeto 'data'
+                    const stopChildId = data?.childId || effectiveChildId; 
                     
                     if (!stopChildId) { 
                         console.warn('[WebSocket-AudioControl] Requisição stopAudioStream inválida: childId ausente na mensagem ou na propriedade "data".');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de áudio inválida: childId ausente.' }));
                         return;
                     }
-                    // Validação de parentId e clientType, se necessário (do seu código original)
-                    // if (ws.clientType !== 'parent' || ws.currentParentId !== effectiveParentId) { 
-                    //     console.warn('[WebSocket-AudioControl] Requisição stopAudioStream inválida: não é pai identificado.');
-                    //     ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de áudio inválida: cliente não identificado.' }));
-                    //     return;
-                    // }
 
                     // Obtém a conexão WebSocket do filho no CANAL DE CONTROLE DE ÁUDIO
                     const childAudioControlWsStop = activeAudioControlClients.get(stopChildId);
@@ -717,21 +699,41 @@ wssAudioControl.on('connection', ws => {
                         }));
                     }
                     break;
-                case 'ping': // NOVO: Tratar ping do cliente
+                
+                case 'audioData': // NOVO: Lidar com dados de áudio do filho neste canal
+                    const audioDataChildId = effectiveChildId;
+                    const audioDataParentId = effectiveParentId; // Pode vir do connect message ou do payload
+                    const audioBase64 = data?.data; // O Base64 está na propriedade 'data' dentro do 'data'
+
+                    if (!audioDataChildId || !audioBase64 || !audioDataParentId) {
+                        console.warn('[WS-AudioControl] Mensagem audioData inválida: childId, parentId ou dados Base64 ausentes.');
+                        return;
+                    }
+
+                    const parentWsForAudioData = parentToWebSocket.get(audioDataParentId); // Pegar WS do pai no canal geral
+                    if (parentWsForAudioData && parentWsForAudioData.readyState === WebSocket.OPEN) {
+                        parentWsForAudioData.send(JSON.stringify({
+                            type: 'audioData', // Manter o tipo para o pai
+                            childId: audioDataChildId,
+                            data: audioBase64
+                        }));
+                        console.log(`[WS-AUDIO-CONTROL-FORWARD] Encaminhando dados de áudio de ChildId=${audioDataChildId} para Pai=${audioDataParentId} (via WS-General). Tamanho do dado: ${audioBase64.length}.`);
+                    } else {
+                        console.warn(`[WS-AUDIO-CONTROL-FORWARD] Pai ${audioDataParentId} não encontrado ou offline para receber dados de áudio de ${audioDataChildId}.`);
+                    }
+                    break;
+
+                case 'ping': // Tratar ping do cliente
                     ws.send(JSON.stringify({ type: 'pong' }));
                     console.log(`[WS-AudioControl] Pong enviado em resposta ao ping do ID ${ws.id}.`);
                     break;
-                case 'pong': // NOVO: Tratar pong do servidor (cliente não deveria enviar, mas para robustez)
+                case 'pong': // Tratar pong do servidor (cliente não deveria enviar, mas para robustez)
                     console.log(`[WS-AudioControl] Pong recebido do cliente ${ws.id}.`);
                     break;
                 case 'startRecording': 
                 case 'stopAudioStreamFromServer': 
                     console.warn(`[WebSocket-AudioControl] Mensagem de tipo ${type} recebida de CLIENTE inesperado. Este tipo de mensagem é para SERVER->CHILD.`);
                     ws.send(JSON.stringify({ type: 'error', message: 'Tipo de mensagem inesperado neste canal.' }));
-                    break;
-                case 'audioData':
-                    console.warn(`[WS-AudioControl] Mensagem 'audioData' recebida inesperadamente no canal de controle de áudio. Deve ir para /ws-audio-data.`);
-                    ws.send(JSON.stringify({ type: 'error', message: 'Mensagem de dados de áudio recebida no canal de controle.' }));
                     break;
                 default:
                     console.warn('[WebSocket-AudioControl] Tipo de mensagem desconhecido:', type);
@@ -766,96 +768,11 @@ wssAudioControl.on('connection', ws => {
 });
 
 
-// WebSocket Server para DADOS de ÁUDIO (filho -> server, server -> parent (via wssGeneralCommands))
-wssAudioData.on('connection', (ws, req) => {
-    const parameters = url.parse(req.url, true).query;
-    const childId = parameters.childId;
-    const parentId = parameters.parentId;
-
-    if (!childId || !parentId) { // Ambas as IDs são necessárias para mapeamento
-        console.error("[Audio-Data-WS] Conexão de dados de áudio rejeitada: childId ou parentId ausente nos parâmetros da URL.");
-        ws.close(1008, "Missing childId or parentId in query"); 
-        return;
-    }
-    
-    activeAudioDataClients.set(childId, { ws: ws, parentId: parentId });
-    const connectionId = uuidv4();
-    activeConnections.set(connectionId, { ws: ws, type: 'child-audio-data', id: connectionId, currentChildId: childId, currentParentId: parentId });
-
-
-    console.log(`[WS-AUDIO-DATA-CONN] Nova conexão WS de dados de áudio: ChildId=${childId}, ParentId=${parentId}. Total de conexões de áudio de dados: ${activeAudioDataClients.size}`);
-
-    ws.on('message', message => {
-        try {
-            let parsedAudioData;
-            if (Buffer.isBuffer(message)) {
-                const messageString = message.toString('utf8').trim();
-                if (messageString.startsWith('{') && messageString.endsWith('}')) {
-                    parsedAudioData = JSON.parse(messageString);
-                } else {
-                    parsedAudioData = {
-                        type: 'audioData',
-                        childId: childId, 
-                        data: message.toString('base64')
-                    };
-                }
-            } else {
-                try {
-                    parsedAudioData = JSON.parse(message);
-                } catch (e) {
-                    parsedAudioData = {
-                        type: 'audioData',
-                        childId: childId,
-                        data: message.toString()
-                    };
-                }
-            }
-            
-            if (parsedAudioData.type === 'audioData' && parsedAudioData.data) {
-                parsedAudioData.childId = childId; 
-                parsedAudioData.parentId = parentId; 
-                
-                const parentWs = parentToWebSocket.get(parentId); 
-                if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                    parentWs.send(JSON.stringify(parsedAudioData));
-                    console.log(`[WS-AUDIO-DATA-FORWARD] Encaminhando dados de áudio de ChildId=${childId} para Pai=${parentId} (via WS-General). Tamanho do dado: ${parsedAudioData.data.length}.`);
-                } else {
-                    console.warn(`[WS-AUDIO-DATA-FORWARD] Pai ${parentId} não encontrado ou offline para receber dados de áudio de ${childId}.`);
-                }
-            } else {
-                console.warn(`[Audio-Data-WS] Mensagem inválida recebida no canal de dados de áudio de ChildId=${childId}: ${JSON.stringify(parsedAudioData)}`);
-            }
-        } catch (error) {
-            console.error(`[Audio-Data-WS] Erro ao processar mensagem do filho ${childId}: ${error.message}`);
-        }
-    });
-
-    ws.on('close', (code, reason) => {
-        console.log(`[WS-AUDIO-DATA-CLOSE] Filho ${childId} desconectado do WebSocket de dados de áudio. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
-        activeAudioDataClients.delete(childId);
-        const connToRemoveId = Array.from(activeConnections.values()).find(conn => conn.ws === ws && conn.currentChildId === childId)?.id;
-        if (connToRemoveId) {
-            activeConnections.delete(connToRemoveId); 
-        }
-        console.log(`[WS-AUDIO-DATA-CLOSE] Conexão de áudio de ${childId} removida. Total: ${activeAudioDataClients.size}`);
-    });
-
-    ws.on('error', error => {
-        console.error(`[WS-AUDIO-DATA-ERROR] Erro no WebSocket de dados de áudio para ${childId}:`, error);
-        activeAudioDataClients.delete(childId);
-        const connToRemoveId = Array.from(activeConnections.values()).find(conn => conn.ws === ws && conn.currentChildId === childId)?.id;
-        if (connToRemoveId) {
-            activeConnections.delete(connToRemoveId);
-        }
-    });
-});
-
 // --- INICIO DO SERVIDOR ---
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`);
-    console.log(`WebSocket de comandos gerais em: ws://localhost:${PORT}/ws-general-commands`);
-    console.log(`WebSocket de dados de áudio em: ws://localhost:${PORT}/ws-audio-data`);
-    console.log(`WebSocket de controle de áudio em: ws://localhost:${PORT}/ws-audio-control`);
+    console.log(`WebSocket de comandos gerais (GPS, Chat) em: ws://localhost:${PORT}/ws-general-commands`);
+    console.log(`WebSocket de controle e dados de áudio em: ws://localhost:${PORT}/ws-audio-control`);
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
     console.log(`Bucket S3 configurado via env: ${process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'}`);
     console.log(`AWS Access Key ID configurada via env: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
