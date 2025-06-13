@@ -267,7 +267,7 @@ server.on('upgrade', (request, socket, head) => {
         wssAudioControl.handleUpgrade(request, socket, head, ws => {
             wssAudioControl.emit('connection', ws, request);
         });
-    } else { // Qualquer outro pathname (incluindo /ws-audio-data) será destruído, pois não existe mais
+    } else { // Qualquer outro pathname (incluindo /ws-audio-data) será destruído
         console.warn(`[HTTP-Upgrade] Pathname desconhecido ou removido: ${pathname}. Conexão destruída.`);
         socket.destroy();
     }
