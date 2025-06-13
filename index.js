@@ -474,7 +474,7 @@ wssGeneralCommands.on('connection', ws => {
                     break;
                 case 'requestLocation':
                     const targetChildIdForLocation = effectiveChildId;
-                    console.log(`[WS-General-DEBUG] ANTES requestLocation check: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                    console.log(`[WS-General] Comando 'requestLocation' recebido para filho: ${targetChildIdForLocation}.`);
                     if (ws.clientType !== 'parent' || !targetChildIdForLocation) {
                         console.warn('[WebSocket-General] Requisição de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de localização inválida.' }));
@@ -495,7 +495,7 @@ wssGeneralCommands.on('connection', ws => {
                     break;
                 case 'stopLocationUpdates':
                     const targetChildIdForStopLoc = effectiveChildId;
-                    console.log(`[WS-General-DEBUG] ANTES stopLocationUpdates check: ws.clientType=${ws.clientType}, ws.currentParentId=${ws.currentParentId}, ws.id=${ws.id}`);
+                    console.log(`[WS-General] Comando 'stopLocationUpdates' recebido para filho: ${targetChildIdForStopLoc}.`);
                     if (ws.clientType !== 'parent' || !targetChildIdForStopLoc) {
                         console.warn('[WebSocket-General] Requisição de parada de localização inválida: não é pai ou childId ausente.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
@@ -524,14 +524,13 @@ wssGeneralCommands.on('connection', ws => {
                     break;
                 case 'audioData': // Este é o audioData que VEM DO SERVIDOR PARA O PAI (ENCAMINHADO)
                     // O pai receberá audioData NESTE CANAL.
-                    // A mensagem já virá do formato correto do wssAudioControl (ChildId, ParentId, Data)
                     console.log(`[WS-General] AudioData recebido para o pai (encaminhado do canal de áudio consolidado): ChildId=${effectiveChildId}.`);
                     // Nenhuma ação adicional é necessária aqui no servidor, apenas o log de que chegou.
                     // O aplicativo pai (Kodular) fará a reprodução.
                     break;
                 case 'startAudioStream': // Comando para iniciar áudio (pai -> servidor)
                 case 'stopAudioStream': // Comando para parar áudio (pai -> servidor)
-                    // Estes comandos virão do aplicativo pai. O servidor deve encaminhá-los para o filho no canal de controle de áudio.
+                    console.log(`[WS-General] Comando de áudio '${type}' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdAudioCommand = effectiveChildId;
                     const childAudioControlWs = activeAudioControlClients.get(targetChildIdAudioCommand);
 
@@ -665,7 +664,7 @@ wssAudioControl.on('connection', ws => {
 
             switch (type) {
                 case 'childConnectAudioControl':
-                    console.log(`[WS-AUDIO-CONTROL-CONN-DEBUG] Recebido childConnectAudioControl do filho ${effectiveChildId}. Conexão ID: ${ws.id}. Estado antes de adicionar ao mapa: isChildConnected = ${activeAudioControlClients.has(effectiveChildId)}.`);
+                    console.log(`[WS-AUDIO-CONTROL-CONN-DEBUG] Recebido childConnectAudioControl do filho ${effectiveChildId}. Conexão ID: ${ws.id}.`);
                     ws.clientType = 'child-audio-control';
                     ws.currentChildId = effectiveChildId;
                     ws.currentParentId = effectiveParentId;
