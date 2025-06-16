@@ -275,23 +275,25 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 // Função genérica para enviar comandos com re-tentativa
-function sendCommandToChildWithRetry(childId, commandMessage, maxRetries = 3, initialDelay = 1000, currentRetry = 0) {
-    const childWs = childToWebSocket.get(childId);
-    if (childWs && childWs.readyState === WebSocket.OPEN) {
-        childWs.send(JSON.stringify(commandMessage));
-        console.log(`[Command-Retry] Comando '${commandMessage.type}' enviado com sucesso para filho ${childId}.`);
+// Adicionei um parâmetro `targetMap` para especificar qual mapa de WebSockets usar
+function sendCommandWithRetry(childId, commandMessage, targetMap, maxRetries = 3, initialDelay = 1000, currentRetry = 0) {
+    const targetWs = targetMap.get(childId); // Usa o mapa de destino
+    
+    if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+        targetWs.send(JSON.stringify(commandMessage));
+        console.log(`[Command-Retry] Comando '${commandMessage.type}' enviado com sucesso para filho ${childId} via ${targetMap === childToWebSocket ? 'General' : 'AudioControl'} WS.`);
     } else {
-        console.warn(`[Command-Retry] Filho ${childId} não conectado (tentativa ${currentRetry + 1}/${maxRetries}).`);
+        console.warn(`[Command-Retry] Filho ${childId} não conectado no mapa ${targetMap === childToWebSocket ? 'General' : 'AudioControl'} WS (tentativa ${currentRetry + 1}/${maxRetries}).`);
         if (currentRetry < maxRetries) {
             const delay = initialDelay * Math.pow(2, currentRetry);
             console.log(`[Command-Retry] Re-tentando comando '${commandMessage.type}' para filho ${childId} em ${delay}ms.`);
             setTimeout(() => {
-                sendCommandToChildWithRetry(childId, commandMessage, maxRetries, initialDelay, currentRetry + 1);
+                sendCommandWithRetry(childId, commandMessage, targetMap, maxRetries, initialDelay, currentRetry + 1);
             }, delay);
         } else {
-            console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' para filho ${childId} após ${maxRetries} tentativas.`);
+            console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' para filho ${childId} após ${maxRetries} tentativas no mapa ${targetMap === childToWebSocket ? 'General' : 'AudioControl'} WS.`);
             // Notificar o pai que o comando falhou
-            const parentWs = parentToWebSocket.get(commandMessage.parentId); // Assumindo parentId está na mensagem do comando
+            const parentWs = parentToWebSocket.get(commandMessage.parentId); 
             if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                 parentWs.send(JSON.stringify({
                     type: 'commandFailed',
@@ -324,7 +326,7 @@ wssGeneralCommands.on('connection', ws => {
     ws.on('message', async message => {
         let finalParsedMessage = null;
         const rawMessageString = (Buffer.isBuffer(message) ? message.toString('utf8') : message).trim();
-        console.log(`[WebSocket-General-RAW] Mensagem recebida (raw): ${rawMessageString}`); // LOG: Mensagem bruta
+        console.log(`[WebSocket-General-RAW] Mensagem recebida (raw): ${rawMessageString}`);
 
         try {
             let messageString = rawMessageString;
@@ -516,8 +518,8 @@ wssGeneralCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de localização inválida.' }));
                         return;
                     }
-                    // Usa a função de re-tentativa para enviar o comando ao filho
-                    sendCommandToChildWithRetry(reqLocChildId, { type: 'startLocationUpdates', parentId: ws.currentParentId });
+                    // Usa a função de re-tentativa para enviar o comando ao filho no CANAL GERAL (onde startLocationUpdates é esperado)
+                    sendCommandWithRetry(reqLocChildId, { type: 'startLocationUpdates', parentId: ws.currentParentId }, childToWebSocket);
                     ws.send(JSON.stringify({ type: 'info', message: `Solicitando localização para ${reqLocChildId}.` }));
                     break;
 
@@ -530,8 +532,8 @@ wssGeneralCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
                         return;
                     }
-                    // Usa a função de re-tentativa para enviar o comando ao filho
-                    sendCommandToChildWithRetry(stopLocChildId, { type: 'stopLocationUpdates', parentId: ws.currentParentId });
+                    // Usa a função de re-tentativa para enviar o comando ao filho no CANAL GERAL
+                    sendCommandWithRetry(stopLocChildId, { type: 'stopLocationUpdates', parentId: ws.currentParentId }, childToWebSocket);
                     ws.send(JSON.stringify({
                         type: 'locationCommandStatus',
                         status: 'sent',
@@ -543,8 +545,8 @@ wssGeneralCommands.on('connection', ws => {
                     console.log(`[WS-General] Comando 'startAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdAudioCommand = effectiveChildId;
 
-                    // Envia uma mensagem para o canal de controle de áudio do filho, com re-tentativa
-                    sendCommandToChildWithRetry(targetChildIdAudioCommand, { type: 'startRecording', parentId: ws.currentParentId }, 5, 500, 0); // 5 retries, 500ms initial delay
+                    // IMPORTANTE: Envia o comando startRecording para o CANAL DE CONTROLE DE ÁUDIO do filho
+                    sendCommandWithRetry(targetChildIdAudioCommand, { type: 'startRecording', parentId: ws.currentParentId }, activeAudioControlClients, 5, 500, 0); 
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
                         status: 'activating',
@@ -557,8 +559,8 @@ wssGeneralCommands.on('connection', ws => {
                     console.log(`[WS-General] Comando 'stopAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdStopAudio = effectiveChildId;
                     
-                    // Envia uma mensagem para o canal de controle de áudio do filho, com re-tentativa
-                    sendCommandToChildWithRetry(targetChildIdStopAudio, { type: 'stopAudioStreamFromServer', parentId: ws.currentParentId }, 5, 500, 0); // 5 retries, 500ms initial delay
+                    // IMPORTANTE: Envia o comando stopAudioStreamFromServer para o CANAL DE CONTROLE DE ÁUDIO do filho
+                    sendCommandWithRetry(targetChildIdStopAudio, { type: 'stopAudioStreamFromServer', parentId: ws.currentParentId }, activeAudioControlClients, 5, 500, 0); 
 
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
@@ -586,10 +588,8 @@ wssGeneralCommands.on('connection', ws => {
         
         activeConnections.delete(disconnectedId);
         if (ws.clientType === 'child' && ws.currentChildId) {
-            // Remove o filho do mapa childToWebSocket
             childToWebSocket.delete(ws.currentChildId);
         } else if (ws.clientType === 'parent' && ws.currentParentId) {
-            // Remove o pai do mapa parentToWebSocket
             parentToWebSocket.delete(ws.currentParentId);
         }
 
@@ -746,8 +746,6 @@ wssAudioData.on('connection', (ws, req) => {
         return;
     }
     
-    // Armazena a conexão de dados de áudio no mapa (mapeando pelo childId)
-    // Isso permite ao servidor encaminhar o áudio para o pai correto.
     activeAudioDataClients.set(childId, { ws: ws, parentId: parentId }); 
     const connectionId = uuidv4();
     activeConnections.set(connectionId, { ws: ws, type: 'child-audio-data', id: connectionId, currentChildId: childId, currentParentId: parentId });
