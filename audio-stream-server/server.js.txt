@@ -1,0 +1,159 @@
+// Importações necessárias
+const WebSocket = require('ws'); // Para gerenciar conexões WebSocket
+const http = require('http');     // Para o servidor HTTP
+const url = require('url');       // Para analisar URLs
+
+// Configurações do servidor
+const WS_PORT = 8080; // Porta para o WebSocket (app filho se conecta aqui)
+const HTTP_PORT = 8081; // Porta para o HTTP (app pai se conecta aqui para o stream)
+
+// Configurações de áudio (DEVE CORRESPONDER AO APP FILHO)
+const SAMPLE_RATE = 16000;
+const BITS_PER_SAMPLE = 16; // PCM 16-bit
+const NUM_CHANNELS = 1;     // Mono
+
+// --- Buffer de Áudio ---
+// Usaremos um Array de Buffers para armazenar os chunks de áudio mais recentes.
+// Isso permite que novos clientes recebam um "pedaço" do áudio recente ao conectar.
+const AUDIO_BUFFER_HISTORY_SECONDS = 10; // Armazenar os últimos 10 segundos de áudio
+const BYTES_PER_SECOND = SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * NUM_CHANNELS;
+const MAX_BUFFER_SIZE = BYTES_PER_SECOND * AUDIO_BUFFER_HISTORY_SECONDS; // Buffer de 10 segundos
+let audioBuffer = Buffer.alloc(0); // Buffer principal que armazena o áudio
+
+// --- Clientes HTTP Conectados (para retransmissão) ---
+const httpClients = new Set(); // Armazena objetos de resposta HTTP (res)
+
+// --- Função para criar o cabeçalho WAV ---
+// Este cabeçalho será enviado UMA ÚNICA VEZ para cada cliente HTTP que se conectar ao stream.
+function createWavHeader(audioDataLength) {
+    const header = Buffer.alloc(44);
+    const view = new DataView(header.buffer);
+
+    // RIFF chunk
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, audioDataLength + 36, true); // Tamanho total do arquivo (dados + 36 bytes do resto do cabeçalho)
+    writeString(view, 8, 'WAVE');
+
+    // fmt subchunk
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);    // Tamanho do subchunk fmt (16 para PCM)
+    view.setUint16(20, 1, true);     // Formato de áudio (1 para PCM)
+    view.setUint16(22, NUM_CHANNELS, true); // Número de canais
+    view.setUint32(24, SAMPLE_RATE, true); // Taxa de amostragem
+    view.setUint32(28, SAMPLE_RATE * NUM_CHANNELS * (BITS_PER_SAMPLE / 8), true); // Byte rate
+    view.setUint16(32, NUM_CHANNELS * (BITS_PER_SAMPLE / 8), true); // Block Align
+    view.setUint16(34, BITS_PER_SAMPLE, true); // Bits per sample
+
+    // data subchunk
+    writeString(view, 36, 'data');
+    view.setUint32(40, audioDataLength, true); // Tamanho real dos dados do áudio neste chunk
+
+    return header;
+}
+
+// Função auxiliar para escrever string em um DataView
+function writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+}
+
+// --- Servidor WebSocket (para receber áudio do app filho) ---
+const wss = new WebSocket.Server({ port: WS_PORT });
+
+wss.on('connection', function connection(ws, req) {
+    const parameters = url.parse(req.url, true).query;
+    const childId = parameters.childId || 'unknown';
+    const parentId = parameters.parentId || 'unknown';
+
+    console.log(`[WS-Audio-RAW] Conexão estabelecida do filho: ${childId} (pai: ${parentId})`);
+
+    ws.on('message', function incoming(message) {
+        if (typeof message === 'string') {
+            // Se receber uma string (pode ser mensagem de controle/debug)
+            console.log(`[WS-Audio-RAW] Mensagem de string recebida do filho ${childId}: ${message}`);
+            // Você pode adicionar lógica aqui para lidar com mensagens de controle em string
+        } else if (Buffer.isBuffer(message)) {
+            // Se for um Buffer (dados de áudio RAW PCM)
+            // console.log(`[WS-Audio-RAW] Chunk de áudio RAW recebido do filho ${childId}: ${message.length} bytes.`);
+
+            // Adiciona o novo chunk ao buffer e mantém o tamanho máximo
+            audioBuffer = Buffer.concat([audioBuffer, message]);
+            if (audioBuffer.length > MAX_BUFFER_SIZE) {
+                audioBuffer = audioBuffer.slice(audioBuffer.length - MAX_BUFFER_SIZE);
+            }
+
+            // Retransmite o chunk para todos os clientes HTTP conectados
+            httpClients.forEach(res => {
+                try {
+                    res.write(message); // Escreve o chunk de áudio
+                } catch (error) {
+                    console.error(`Erro ao enviar chunk para cliente HTTP: ${error.message}`);
+                    res.end(); // Finaliza a conexão do cliente com erro
+                    httpClients.delete(res);
+                }
+            });
+        }
+    });
+
+    ws.on('close', function close(code, reason) {
+        console.log(`[WS-Audio-RAW] Conexão do filho ${childId} fechada. Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
+    });
+
+    ws.on('error', function error(err) {
+        console.error(`[WS-Audio-RAW] Erro no WebSocket do filho ${childId}: ${err.message}`);
+    });
+});
+
+console.log(`Servidor WebSocket para áudio RAW ouvindo em ws://localhost:${WS_PORT}/ws-audio-data-raw`);
+
+
+// --- Servidor HTTP (para retransmitir áudio para o app pai) ---
+const httpServer = http.createServer((req, res) => {
+    // Apenas lidar com o endpoint de áudio live
+    if (req.url === '/live-audio.wav') {
+        console.log('[HTTP-Stream] Cliente conectado para stream de áudio.');
+
+        // Define os cabeçalhos para um stream WAV
+        res.writeHead(200, {
+            'Content-Type': 'audio/wav',
+            'Transfer-Encoding': 'chunked', // Permite enviar dados sem saber o Content-Length final
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*' // Permite CORS, importante para o Kodular/testes
+        });
+
+        // Envia o cabeçalho WAV inicial (com 0 no tamanho dos dados, pois é um stream)
+        const wavHeader = createWavHeader(0); // Tamanho dos dados inicialmente 0 para stream
+        res.write(wavHeader);
+
+        // Envia o conteúdo do buffer de áudio atual (histórico)
+        if (audioBuffer.length > 0) {
+            res.write(audioBuffer);
+        }
+
+        // Adiciona a resposta (res) ao conjunto de clientes HTTP
+        httpClients.add(res);
+
+        // Remove o cliente quando a conexão é fechada ou com erro
+        req.on('close', () => {
+            console.log('[HTTP-Stream] Cliente desconectado.');
+            httpClients.delete(res);
+        });
+        req.on('error', (err) => {
+            console.error(`[HTTP-Stream] Erro na conexão HTTP do cliente: ${err.message}`);
+            httpClients.delete(res);
+        });
+
+    } else {
+        // Resposta padrão para outras rotas (opcional)
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Servidor de Streaming de Audio. Conecte-se a /live-audio.wav para o stream de audio.');
+    }
+});
+
+httpServer.listen(HTTP_PORT, () => {
+    console.log(`Servidor HTTP para stream de áudio ouvindo em http://localhost:${HTTP_PORT}`);
+    console.log('--- ATENÇÃO: Use ngrok para expor estas portas publicamente! ---');
+    console.log(`Exemplo ngrok: ngrok http ${HTTP_PORT}`);
+    console.log(`Exemplo ngrok: ngrok http ${WS_PORT}`);
+});

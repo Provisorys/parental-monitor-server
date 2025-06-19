@@ -22,5 +22,14 @@
     "uuid": "^11.1.0",
     "ws": "^8.18.2",
     "xmlbuilder": "^15.1.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Provisorys/parental-monitor-server.git"
+  },
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Provisorys/parental-monitor-server/issues"
+  },
+  "homepage": "https://github.com/Provisorys/parental-monitor-server#readme"
 }
