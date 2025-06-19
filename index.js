@@ -52,7 +52,7 @@ const server = http.createServer(app);
 const wssGeneralCommands = new WebSocket.Server({ noServer: true }); 
 const wssAudioControl = new WebSocket.Server({ noServer: true }); 
 
-// Funções auxiliares (como updateChildConnectionStatus e sendCommandWithRetry)
+// Funções auxiliares
 async function updateChildConnectionStatus(childId, connected) {
     const params = {
         TableName: DYNAMODB_TABLE_CHILDREN,
@@ -182,7 +182,6 @@ app.get('/conversations/:parentId', async (req, res) => {
             parentId: item.parentId
         }));
         res.status(200).json(conversations);
-        console.log(`[HTTP] Conversas para o pai ${parentId} retornadas.`);
     } catch (error) {
         console.error('Erro ao obter conversas:', error);
         res.status(500).send('Erro ao obter conversas.');
@@ -200,7 +199,6 @@ app.get('/messages/:conversationId', async (req, res) => {
     try {
         const data = await docClient.query(params).promise();
         res.status(200).json(data.Items);
-        console.log(`[HTTP] Mensagens para a conversa ${conversationId} retornadas.`);
     } catch (error) {
         console.error('Erro ao obter mensagens:', error);
         res.status(500).send('Erro ao obter mensagens.');
@@ -219,7 +217,6 @@ app.get('/locations/:childId', async (req, res) => {
     try {
         const data = await docClient.query(params).promise();
         res.status(200).json(data.Items);
-        console.log(`[HTTP] Localizações para o filho ${childId} retornadas.`);
     } catch (error) {
         console.error('Erro ao obter localizações:', error);
         res.status(500).send('Erro ao obter localizações.');
@@ -258,7 +255,11 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory';
     const key = `${childId}/${type}/${uuidv4()}-${req.file.originalname}`;
     const params = {
-        Bucket: bucketName, Body: req.file.buffer, ContentType: req.file.mimetype, ACL: 'private' 
+        Bucket: bucketName, 
+        Body: req.file.buffer, 
+        ContentType: req.file.mimetype, 
+        // CORREÇÃO: Removido ACL: 'private' - se o bucket não permite ACLs, nenhuma operação pode usar.
+        // A acessibilidade é definida pela política do bucket (se "PublicReadForGetObject" ou similar).
     };
     try {
         const data = await s3.upload(params).promise();
@@ -295,9 +296,7 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
             Key: filename, 
             Body: req.file.buffer, 
             ContentType: 'audio/wav', 
-            // REMOVIDO: ACL: 'public-read' - esta é a mudança crítica para resolver o erro AccessControlListNotSupported
-            // Se o bucket já tem "Object Ownership" definido para "Bucket owner enforced", ACLs não são permitidas.
-            // A acessibilidade pública agora deve ser configurada através das políticas do bucket S3.
+            // Já removido: ACL: 'public-read'
         };
 
         const s3Result = await s3.upload(s3Params).promise();
@@ -612,7 +611,7 @@ wssGeneralCommands.on('connection', ws => {
             }
         } catch (error) {
             console.error('[WebSocket-General] Erro crítico ao processar mensagem:', error.message);
-            const rawMessageDebug = Buffer.isBuffer(message) ? message.toString('utf8') : message;
+            const rawMessageDebug = (Buffer.isBuffer(message) ? message.toString('utf8') : message);
             console.error('[WebSocket-General] Mensagem original (raw):', rawMessageDebug);
             ws.send(JSON.stringify({ type: 'error', message: `Erro interno ao processar sua mensagem: ${error.message}` }));
         }
@@ -752,7 +751,7 @@ wssAudioControl.on('connection', ws => {
             }
         } catch (error) {
             console.error('[WebSocket-AudioControl] Erro crítico ao processar mensagem:', error.message);
-            const rawMessageDebug = Buffer.isBuffer(message) ? message.toString('utf8') : message;
+            const rawMessageDebug = (Buffer.isBuffer(message) ? message.toString('utf8') : message);
             console.error('[WebSocket-AudioControl] Mensagem original (raw):', rawMessageDebug);
             ws.send(JSON.stringify({ type: 'error', message: `Erro interno ao processar sua mensagem: ${error.message}` }));
         }
