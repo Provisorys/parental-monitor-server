@@ -258,8 +258,8 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         Bucket: bucketName, 
         Body: req.file.buffer, 
         ContentType: req.file.mimetype, 
-        // CORREÇÃO: Removido ACL: 'private' - se o bucket não permite ACLs, nenhuma operação pode usar.
-        // A acessibilidade é definida pela política do bucket (se "PublicReadForGetObject" ou similar).
+        // CORREÇÃO FINAL: Removido ACL: 'private' - se o bucket não permite ACLs, NENHUMA operação pode usar.
+        // A acessibilidade é definida EXCLUSIVAMENTE pela política do bucket (se "PublicReadForGetObject" ou similar).
     };
     try {
         const data = await s3.upload(params).promise();
