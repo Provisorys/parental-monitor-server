@@ -26,11 +26,10 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // Configuração do Multer:
-// Aumentar o limite de tamanho do Multer para lidar com arquivos de áudio/vídeo potencialmente maiores
 const upload = multer({
-    limits: { fileSize: 50 * 1024 * 1024 } // Limite de 50 MB para uploads gerais (ajuste conforme necessário)
+    limits: { fileSize: 50 * 1024 * 1024 } // Limite de 50 MB para uploads gerais
 }); 
-const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // Manter se o app filho ainda usa /upload-audio
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 // Configuração da AWS usando variáveis de ambiente
 AWS.config.update({
@@ -77,7 +76,7 @@ async function updateChildConnectionStatus(childId, connected) {
     }
 }
 
-// sendCommandWithRetry (já está definido no seu index.js, não precisa ser repetido aqui)
+// sendCommandWithRetry (já está definido no seu index.js)
 
 
 // --- ROTAS HTTP (manter as existentes, exceto a modificada /send-notification) ---
@@ -149,15 +148,14 @@ app.get('/conversations/:parentId', async (req, res) => {
     }
 });
 
-// --- Rota /messages/:conversationId (Já existe e será usada pelo app pai) ---
 app.get('/messages/:conversationId', async (req, res) => {
     const { conversationId } = req.params;
     const params = {
         TableName: DYNAMODB_TABLE_MESSAGES,
         KeyConditionExpression: 'conversationId = :conversationId',
         ExpressionAttributeValues: { ':conversationId': conversationId },
-        ScanIndexForward: true, // Ordena do mais antigo para o mais novo
-        Limit: 100 // Limita a 100 mensagens para não sobrecarregar
+        ScanIndexForward: true, 
+        Limit: 100 
     };
     try {
         const data = await docClient.query(params).promise();
@@ -187,44 +185,95 @@ app.get('/locations/:childId', async (req, res) => {
     }
 });
 
+// --- NOVO: Rota para listar conversas do WhatsApp para um filho (para o app pai) ---
+app.get('/whatsapp-conversations/:childId', async (req, res) => {
+    const { childId } = req.params;
+    // Note: Usamos Scan com FilterExpression. Em tabelas DynamoDB muito grandes,
+    // um Global Secondary Index (GSI) com childId como Partition Key seria mais eficiente.
+    const paramsScan = {
+        TableName: DYNAMODB_TABLE_MESSAGES,
+        FilterExpression: 'begins_with(conversationId, :whatsappPrefix) AND childId = :childId',
+        ExpressionAttributeValues: {
+            ':whatsappPrefix': 'WHATSAPP-', // Prefixo que usamos para conversationId de WhatsApp
+            ':childId': childId
+        },
+        ProjectionExpression: 'conversationId, contactOrGroup, phoneNumber, #ts', // Incluímos timestamp
+        ExpressionAttributeNames: { // Para usar atributos reservados como 'timestamp'
+            '#ts': 'timestamp' 
+        }
+    };
+
+    try {
+        const data = await docClient.scan(paramsScan).promise();
+        // Coleta os conversationIds únicos e seus respectivos nomes de contato/grupo
+        const uniqueConversations = new Map(); 
+        data.Items.forEach(item => {
+            const key = item.conversationId; // A chave é o conversationId completo
+            if (!uniqueConversations.has(key)) {
+                uniqueConversations.set(key, {
+                    conversationId: item.conversationId,
+                    contactName: item.contactOrGroup || item.phoneNumber || 'Desconhecido',
+                    phoneNumber: item.phoneNumber,
+                    lastMessageTimestamp: item.timestamp // Último timestamp para ordenação ou informação
+                });
+            } else {
+                // Se já existe, atualiza com o timestamp mais recente, se for uma conversa contínua
+                if (item.timestamp && item.timestamp > uniqueConversations.get(key).lastMessageTimestamp) {
+                    uniqueConversations.get(key).lastMessageTimestamp = item.timestamp;
+                }
+            }
+        });
+        
+        // Converte o Map para um Array e ordena pelas mensagens mais recentes
+        const sortedConversations = Array.from(uniqueConversations.values()).sort((a, b) => {
+            // Converte timestamps para números para comparação (se forem ISO strings)
+            const tsA = new Date(a.lastMessageTimestamp).getTime();
+            const tsB = new Date(b.lastMessageTimestamp).getTime();
+            return tsB - tsA; // Mais recente primeiro
+        });
+
+        console.log(`[DynamoDB] Listando conversas do WhatsApp para filho ${childId}. Encontradas ${sortedConversations.length} conversas únicas.`);
+        res.status(200).json(sortedConversations);
+    } catch (error) {
+        console.error(`Erro ao listar conversas do WhatsApp para filho ${childId}:`, error);
+        res.status(500).send('Erro ao listar conversas do WhatsApp.');
+    }
+});
+
 
 // --- Rota /send-notification MODIFICADA para SALVAR no DynamoDB APENAS ---
 app.post('/send-notification', async (req, res) => {
-    // Campos que o WhatsappAccessibilityService envia no NotificationRequest
+    console.log('[HTTP-Notification] Requisição recebida para /send-notification. Corpo:', req.body); // Loga o corpo da requisição
+    
     const { childId, message, messageType, timestamp, contactOrGroup, direction, phoneNumber, recipientId, title, body } = req.body; 
     
     if (!childId || !message || !messageType) {
-        console.error('[HTTP-Notification] Dados incompletos para processar mensagem/notificação:', req.body);
+        console.error('[HTTP-Notification] Dados incompletos para processar mensagem/notificação. childId, message ou messageType ausentes.', req.body);
         return res.status(400).send('Dados incompletos para processar mensagem/notificação.');
     }
 
     try {
-        // Geração consistente do conversationId para mensagens do WhatsApp
-        // Usamos uma padronização 'WHATSAPP-' para distinguir de outros tipos de conversa (se houver)
-        // e incluímos o childId e um identificador para o contato/grupo.
-        // Sanitizamos o contactOrGroup/phoneNumber para evitar caracteres inválidos no ID.
         const contactIdentifier = (contactOrGroup || phoneNumber || 'unknown_contact')
-                                    .replace(/[^a-zA-Z0-9-]/g, '_') // Substitui caracteres inválidos por '_'
-                                    .substring(0, 50); // Limita o tamanho para evitar IDs muito longos
+                                    .replace(/[^a-zA-Z0-9-]/g, '_') 
+                                    .substring(0, 50); 
         
         const conversationId = `WHATSAPP-${childId}-${contactIdentifier}`; 
         
         const messageToSave = {
-            conversationId: conversationId, // Usará este como Partition Key no DynamoDB
-            messageId: uuidv4(), // Usará este como Sort Key (ou um campo de timestamp se você preferir)
+            conversationId: conversationId, 
+            messageId: uuidv4(), // Garante unicidade e pode servir como Sort Key
             childId: childId,
-            // Tenta obter o parentId associado à conexão do filho (pode ser 'unknown_parent' se o filho não estiver conectado no WS geral)
             parentId: childToWebSocket.has(childId) ? childToWebSocket.get(childId).currentParentId : 'unknown_parent', 
-            sender: (direction === 'sent') ? childId : (contactOrGroup || phoneNumber || 'unknown_sender'), // Quem enviou a mensagem (filho ou contato/grupo)
-            receiver: (direction === 'sent') ? (contactOrGroup || phoneNumber || 'unknown_receiver') : childId, // Quem recebeu
+            sender: (direction === 'sent') ? childId : (contactOrGroup || phoneNumber || 'unknown_sender'), 
+            receiver: (direction === 'sent') ? (contactOrGroup || phoneNumber || 'unknown_receiver') : childId, 
             message: message,
-            messageType: messageType, // Ex: WHATSAPP_MESSAGE
-            timestamp: timestamp || new Date().toISOString(),
+            messageType: messageType, 
+            timestamp: timestamp || new Date().toISOString(), // Usar ISO string para consistência e ordenação
             contactOrGroup: contactOrGroup,
             phoneNumber: phoneNumber,
             direction: direction,
-            title: title, // Título da notificação (geralmente nome do contato/grupo)
-            body: body // Corpo da notificação (a mensagem em si)
+            title: title, 
+            body: body 
         };
 
         const paramsSaveMessage = {
@@ -232,14 +281,16 @@ app.post('/send-notification', async (req, res) => {
             Item: messageToSave
         };
         await docClient.put(paramsSaveMessage).promise();
-        console.log(`[DynamoDB] Mensagem do WhatsApp salva no DynamoDB: '${messageToSave.message}' de ${messageToSave.contactOrGroup}. Conversation ID: ${conversationId}`);
-
-        // --- REMOVIDO: Encaminhamento para o Aplicativo Pai via WebSocket ---
-        // Agora o aplicativo pai fará a solicitação diretamente ao DynamoDB.
+        console.log(`[DynamoDB] Mensagem do WhatsApp SALVA com sucesso no DynamoDB. Conversation ID: ${conversationId}, Mensagem: '${messageToSave.message}'.`);
 
         res.status(200).send('Notificação/Mensagem processada e salva no DynamoDB com sucesso!');
     } catch (error) {
-        console.error('Erro ao processar mensagem do WhatsApp:', error);
+        console.error('[HTTP-Notification] ERRO ao salvar mensagem do WhatsApp no DynamoDB:', error); // Log mais específico para erro de DB
+        if (error.code === 'ResourceNotFoundException') {
+            console.error('[DynamoDB ERROR] A tabela "Messages" pode não existir ou o nome está incorreto. Verifique sua configuração no AWS DynamoDB.');
+        } else if (error.code === 'ValidationException') {
+            console.error('[DynamoDB ERROR] Erro de validação. Verifique se os tipos de dados e chaves (Partition Key: conversationId, Sort Key: messageId/timestamp) estão corretos para a tabela "Messages".');
+        }
         res.status(500).send('Erro interno do servidor ao processar mensagem do WhatsApp.');
     }
 });
@@ -270,15 +321,12 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
             Key: filename, 
             Body: req.file.buffer, 
             ContentType: 'audio/wav', 
-            // CORREÇÃO FINAL: Removido ACL: 'private' - se o bucket não permite ACLs, NENHUMA operação pode usar.
-            // A acessibilidade é definida EXCLUSIVAMENTE pela política do bucket (se "PublicReadForGetObject" ou similar).
         };
 
         const s3Result = await s3.upload(s3Params).promise();
 
         console.log(`[HTTP-Upload-Audio] Áudio recebido de ${childId} e salvo em S3 como ${filename}. URL: ${s3Result.Location}`);
 
-        // --- NOVO CONTROLE: Verificar se o pai está ouvindo este filho ---
         const parentIsListeningToThisChild = parentListeningToChild.get(parentIdFromChild);
         if (parentIsListeningToThisChild === childId) {
             const parentWs = parentToWebSocket.get(parentIdFromChild);
@@ -295,9 +343,6 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
             }
         } else {
             console.log(`[WS-Parent] Pai ${parentIdFromChild} NÃO está ouvindo ativamente o filho ${childId}. URL de áudio ignorada.`);
-            // Opcional: Se o pai não está ouvindo, podemos tentar parar a gravação deste filho
-            // para evitar uploads desnecessários. Isso exigiria enviar um comando 'stopAudioStreamFromServer'
-            // para o childId via activeAudioControlClients. Mas é mais complexo para um simples upload.
         }
 
         res.status(200).json({ message: 'Áudio salvo com sucesso!', url: s3Result.Location, childId: childId });
@@ -340,7 +385,7 @@ server.on('upgrade', (request, socket, head) => {
 
 // --- LÓGICA DE WEBSOCKETS (manter as existentes) ---
 
-// Função auxiliar para enviar comandos com retentativa (já inclui o envio de 'commandFailed' para o pai)
+// Função auxiliar para enviar comandos com retentativa
 function sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog, maxRetries = 3, initialDelay = 1000, currentRetry = 0) {
     const targetWs = targetMap.get(childId);
     
@@ -359,7 +404,6 @@ function sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog,
             }, delay);
         } else {
             console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' para filho ${childId} após ${maxRetries} tentativas no mapa ${mapNameForLog} WS.`);
-            // Envia um erro para o pai se o comando falhar
             const parentWs = parentToWebSocket.get(commandMessage.parentId); 
             if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                 parentWs.send(JSON.stringify({
@@ -539,8 +583,7 @@ wssGeneralCommands.on('connection', ws => {
                         console.warn(`[Location] Pai ${locParentId} não encontrado ou offline para receber dados de localização de ${locChildId}.`);
                     }
                     break;
-                case 'chatMessage': // Este case é para chat *direto* entre pai e filho via WS.
-                                    // As mensagens do WhatsApp vêm via HTTP POST para /send-notification.
+                case 'chatMessage': 
                     const senderId = ws.currentChildId || ws.currentParentId; 
                     const receiverIdFromPayload = effectiveChildId || effectiveParentId; 
 
@@ -558,7 +601,6 @@ wssGeneralCommands.on('connection', ws => {
                     const messageParams = {
                         TableName: DYNAMODB_TABLE_MESSAGES,
                         Item: {
-                            // Este conversationId é para chat PAI-FILHO (se você usa essa funcionalidade)
                             conversationId: [ws.currentParentId, ws.currentChildId].filter(Boolean).sort().join('-'), 
                             messageId: uuidv4(),
                             parentId: ws.currentParentId || receiverIdFromPayload, 
@@ -568,8 +610,7 @@ wssGeneralCommands.on('connection', ws => {
                             timestamp: new Date().toISOString()
                         }
                     };
-                    // Salvando a mensagem no DynamoDB aqui (se for um chat direto via WS)
-                    await docClient.put(messageParams).promise(); 
+                    await docClient.put(messageParams).promise();
                     console.log(`[DynamoDB] Mensagem de chat salva de ${senderId} para ${receiverIdFromPayload}.`);
 
                     if (targetWsReceiver && targetWsReceiver.readyState === WebSocket.OPEN) {
