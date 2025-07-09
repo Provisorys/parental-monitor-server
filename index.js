@@ -49,8 +49,7 @@ const TABLE_LOCATIONS = 'GPSintegracao';
 const TABLE_MESSAGES = 'Messages';
 const TABLE_CALLS = process.env.DYNAMODB_TABLE_CALLS || 'parental-monitor-calls'; // Mantido padrão, ajuste se tiver um nome específico
 const TABLE_NOTIFICATIONS = process.env.DYNAMODB_TABLE_NOTIFICATIONS || 'parental-monitor-notifications'; // Mantido padrão, ajuste se tiver um nome específico
-// --- NOVA TABELA PARA CONVERSAS ---
-const TABLE_CONVERSATIONS = 'Conversations';
+const TABLE_CONVERSATIONS = 'Conversations'; // A nova tabela
 
 // Middlewares
 app.use(cors());
@@ -80,6 +79,25 @@ server.on('upgrade', (request, socket, head) => {
         socket.destroy();
     }
 });
+
+// --- FUNÇÃO AUXILIAR PARA ATUALIZAR STATUS DE CONEXÃO DO FILHO NO DYNAMODB ---
+async function updateChildConnectionStatus(childId, isConnected) {
+    const params = {
+        TableName: TABLE_CHILDREN,
+        Key: { childId: childId },
+        UpdateExpression: 'SET isConnected = :val, lastSeen = :ts',
+        ExpressionAttributeValues: {
+            ':val': isConnected,
+            ':ts': Date.now()
+        }
+    };
+    try {
+        await docClient.update(params).promise();
+        console.log(`[DynamoDB] Status de conexão do filho ${childId} atualizado para ${isConnected}.`);
+    } catch (error) {
+        console.error(`[DynamoDB] Erro ao atualizar status de conexão do filho ${childId}:`, error);
+    }
+}
 
 // --- Rotas HTTP ---
 
@@ -192,7 +210,8 @@ app.post('/register-child', async (req, res) => {
             childName: childName,
             childToken: childToken || 'N/A',
             childImage: childImage || null,
-            lastSeen: Date.now()
+            lastSeen: Date.now(),
+            isConnected: true // Define como conectado no registro
         }
     };
 
@@ -220,9 +239,8 @@ app.post('/send-notification', async (req, res) => {
         let conversationId;
 
         // 1. Tentar encontrar a conversa existente
-        // Usamos childId e contactOrGroup como chaves primárias para a tabela de conversas
         const getConversationParams = {
-            TableName: TABLE_CONVERSATIONS, // Usando o nome da tabela 'Conversations'
+            TableName: TABLE_CONVERSATIONS,
             Key: {
                 childId: childId,
                 contactOrGroup: contactOrGroup
@@ -238,7 +256,7 @@ app.post('/send-notification', async (req, res) => {
 
             // Atualizar lastMessageTimestamp e lastMessageSnippet
             const updateConversationParams = {
-                TableName: TABLE_CONVERSATIONS, // Usando o nome da tabela 'Conversations'
+                TableName: TABLE_CONVERSATIONS,
                 Key: {
                     childId: childId,
                     contactOrGroup: contactOrGroup
@@ -246,7 +264,7 @@ app.post('/send-notification', async (req, res) => {
                 UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet',
                 ExpressionAttributeValues: {
                     ':ts': timestamp,
-                    ':snippet': message.substring(0, 100) + (message.length > 100 ? '...' : '') // Snippet do início da mensagem
+                    ':snippet': message.substring(0, 100) + (message.length > 100 ? '...' : '')
                 }
             };
             await docClient.update(updateConversationParams).promise();
@@ -256,9 +274,10 @@ app.post('/send-notification', async (req, res) => {
             // Nenhuma conversa encontrada, criar uma nova
             conversationId = uuidv4();
             const newConversationParams = {
-                TableName: TABLE_CONVERSATIONS, // Usando o nome da tabela 'Conversations'
+                TableName: TABLE_CONVERSATIONS,
                 Item: {
-                    conversationId: conversationId, // ID único para a conversa
+                    id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Conversations
+                    conversationId: conversationId, 
                     childId: childId,
                     contactOrGroup: contactOrGroup,
                     lastMessageTimestamp: timestamp,
@@ -272,8 +291,9 @@ app.post('/send-notification', async (req, res) => {
 
         // 2. Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
-            messageId: uuidv4(), // ID único para a mensagem
-            conversationId: conversationId, // Link para a conversa
+            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
+            messageId: uuidv4(), 
+            conversationId: conversationId, 
             childId: childId, 
             contactOrGroup: contactOrGroup, 
             messageText: message,
@@ -284,7 +304,7 @@ app.post('/send-notification', async (req, res) => {
         };
 
         const putMessageParams = {
-            TableName: TABLE_MESSAGES, // Usando o nome da tabela 'Messages'
+            TableName: TABLE_MESSAGES,
             Item: messageItem
         };
         await docClient.put(putMessageParams).promise();
@@ -294,19 +314,21 @@ app.post('/send-notification', async (req, res) => {
 
     } catch (error) {
         console.error('[Notification] Erro ao processar notificação:', error);
-        res.status(500).send('Erro interno do servidor ao processar notificação:', error.message);
+        // CORREÇÃO: Enviar um status de erro válido e a mensagem de erro
+        res.status(500).send(`Erro interno do servidor ao processar notificação: ${error.message}`);
     }
 });
+
 
 // Rotas para buscar dados (com nomes de tabela corrigidos)
 app.get('/get-registered-children', async (req, res) => {
     try {
-        const params = { TableName: TABLE_CHILDREN }; // Usando o nome da tabela 'Children'
+        const params = { TableName: TABLE_CHILDREN };
         const data = await docClient.scan(params).promise();
         console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela '${TABLE_CHILDREN}'. Encontrados ${data.Items.length} filhos.`);
         const childrenWithStatus = data.Items.map(child => ({
             ...child,
-            connected: childToWebSocket.has(child.childId)
+            connected: childToWebSocket.has(child.childId) // Verifica se está conectado via WebSocket
         }));
         res.status(200).json(childrenWithStatus);
     } catch (error) {
@@ -318,9 +340,8 @@ app.get('/get-registered-children', async (req, res) => {
 app.get('/conversations/:parentId', async (req, res) => {
     const { parentId } = req.params;
     try {
-        // Primeiro, encontre todos os filhos associados a este parentId
         const getChildrenParams = {
-            TableName: TABLE_CHILDREN, // Usando o nome da tabela 'Children'
+            TableName: TABLE_CHILDREN,
             FilterExpression: 'parentId = :parentId',
             ExpressionAttributeValues: { ':parentId': parentId }
         };
@@ -328,13 +349,12 @@ app.get('/conversations/:parentId', async (req, res) => {
         const childIds = childrenData.Items.map(child => child.childId);
 
         if (childIds.length === 0) {
-            return res.status(200).json([]); // Nenhum filho para este pai, nenhuma conversa
+            return res.status(200).json([]);
         }
 
-        // Para cada filho, buscar suas conversas
         const conversationsPromises = childIds.map(async (childId) => {
             const getConversationsForChildParams = {
-                TableName: TABLE_CONVERSATIONS, // Usando o nome da tabela 'Conversations'
+                TableName: TABLE_CONVERSATIONS,
                 KeyConditionExpression: 'childId = :childId',
                 ExpressionAttributeValues: { ':childId': childId }
             };
@@ -358,7 +378,7 @@ app.get('/conversations/:parentId', async (req, res) => {
 app.get('/messages/:childId/:contactOrGroup', async (req, res) => {
     const { childId, contactOrGroup } = req.params;
     const params = {
-        TableName: TABLE_MESSAGES, // Usando o nome da tabela 'Messages'
+        TableName: TABLE_MESSAGES,
         FilterExpression: 'childId = :childId AND contactOrGroup = :contactOrGroup',
         ExpressionAttributeValues: {
             ':childId': childId,
@@ -380,7 +400,7 @@ app.get('/messages/:childId/:contactOrGroup', async (req, res) => {
 app.get('/locations/:childId', async (req, res) => {
     const { childId } = req.params;
     const params = {
-        TableName: TABLE_LOCATIONS, // Usando o nome da tabela 'GPSintegracao'
+        TableName: TABLE_LOCATIONS,
         KeyConditionExpression: 'childId = :childId',
         ExpressionAttributeValues: { ':childId': childId },
         ScanIndexForward: true,
@@ -411,7 +431,7 @@ app.use((err, req, res, next) => {
 });
 
 
-// --- LÓGICA DE WEBSOCKETS (MANTIDA COMO ESTAVA NA ÚLTIMA VERSÃO CORRIGIDA) ---
+// --- LÓGICA DE WEBSOCKETS ---
 
 // Função auxiliar para enviar comandos com retentativa
 function sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog, maxRetries = 3, initialDelay = 1000, currentRetry = 0) {
@@ -432,7 +452,6 @@ function sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog,
             }, delay);
         } else {
             console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' para filho ${childId} após ${maxRetries} tentativas no mapa ${mapNameForLog} WS.`);
-            // Envia um erro para o pai se o comando falhar
             const parentWs = parentToWebSocket.get(commandMessage.parentId); 
             if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                 parentWs.send(JSON.stringify({
@@ -558,6 +577,7 @@ wssGeneralCommands.on('connection', ws => {
                             ws.id = effectiveChildId; 
                         }
 
+                        // AGORA A FUNÇÃO updateChildConnectionStatus ESTÁ DEFINIDA!
                         await updateChildConnectionStatus(ws.currentChildId, true);
                         console.log(`[DynamoDB] Filho ${ws.currentChildName} (${ws.currentChildId}) status de conexão atualizado para 'true'.`);
                         console.log(`[WebSocket-Manager] Filho conectado e identificado: ID: ${ws.currentChildId}. Total de entradas ativas: ${activeConnections.size}. Filhos conectados (General WS): ${Array.from(childToWebSocket.keys()).join(', ')}`);
@@ -587,9 +607,10 @@ wssGeneralCommands.on('connection', ws => {
                     console.log(`[Location] Localização recebida do filho ${locChildId}: Lat ${effectiveLatitude}, Lng ${effectiveLongitude}`);
 
                     const locationParams = {
-                        TableName: TABLE_LOCATIONS, // Usando o nome da tabela 'GPSintegracao'
+                        TableName: TABLE_LOCATIONS,
                         Item: {
-                            locationId: uuidv4(),
+                            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela GPSintegracao
+                            locationId: uuidv4(), // Mantido, se for um campo adicional
                             childId: locChildId,
                             latitude: effectiveLatitude,
                             longitude: effectiveLongitude,
@@ -627,17 +648,16 @@ wssGeneralCommands.on('connection', ws => {
                     }
                     console.log(`[Chat] Mensagem de ${senderName} (${senderId}) para ${receiverIdFromPayload}: ${chatMessageContent}`);
 
-                    // A lógica de salvar mensagens de chat via WebSocket não é a mesma do WhatsApp.
-                    // Esta é para chat interno entre pai e filho via app, não para mensagens do WhatsApp.
                     const messageParams = {
-                        TableName: TABLE_MESSAGES, // Usando o nome da tabela 'Messages'
+                        TableName: TABLE_MESSAGES,
                         Item: {
-                            messageId: uuidv4(),
+                            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
+                            messageId: uuidv4(), 
                             senderId: senderId,
                             receiverId: receiverIdFromPayload,
                             messageText: chatMessageContent,
                             timestamp: new Date().toISOString(),
-                            messageType: 'APP_CHAT_MESSAGE' // Tipo específico para diferenciar
+                            messageType: 'APP_CHAT_MESSAGE'
                         }
                     };
                     await docClient.put(messageParams).promise();
@@ -688,7 +708,7 @@ wssGeneralCommands.on('connection', ws => {
                 case 'startAudioStream': 
                     console.log(`[WS-General] Comando 'startAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdAudioCommand = effectiveChildId;
-                    const parentIdForAudio = effectiveParentId; // Use o parentId do payload
+                    const parentIdForAudio = effectiveParentId;
 
                     parentListeningToChild.set(parentIdForAudio, targetChildIdAudioCommand);
                     console.log(`[WS-General] Pai ${parentIdForAudio} AGORA está ouvindo o filho ${targetChildIdAudioCommand}.`);
@@ -706,7 +726,7 @@ wssGeneralCommands.on('connection', ws => {
                 case 'stopAudioStream': 
                     console.log(`[WS-General] Comando 'stopAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdStopAudio = effectiveChildId;
-                    const parentIdForStopAudio = effectiveParentId; // Use o parentId do payload
+                    const parentIdForStopAudio = effectiveParentId;
 
                     sendCommandWithRetry(targetChildIdStopAudio, { type: 'stopAudioStreamFromServer', parentId: parentIdForStopAudio }, activeAudioControlClients, 'AudioControl', 5, 500, 0); 
 
@@ -751,7 +771,6 @@ wssGeneralCommands.on('connection', ws => {
             } catch (error) {
                 console.error('Erro ao atualizar status de conexão do filho no DynamoDB:', error);
             }
-            // --- NOVO: Limpa o registro de escuta de qualquer pai que estivesse ouvindo este filho ---
             for (let [parentId, listeningChildId] of parentListeningToChild.entries()) {
                 if (listeningChildId === ws.currentChildId) {
                     parentListeningToChild.delete(parentId);
@@ -766,7 +785,6 @@ wssGeneralCommands.on('connection', ws => {
                 console.warn(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} não encontrado ou já substituído no parentToWebSocket.`);
             }
              console.log(`[WebSocket-General] Pai ${ws.currentParentId} desconectado.`);
-            // --- NOVO: Limpa o registro do que este pai estava ouvindo ---
             parentListeningToChild.delete(ws.currentParentId);
             console.log(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} desconectado. Registro de escuta limpo.`);
         } else {
