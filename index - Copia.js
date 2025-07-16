@@ -30,7 +30,7 @@ const PORT = process.env.PORT || 10000;
 const upload = multer({
     limits: { fileSize: 50 * 1024 * 1024 } // Limite de 50 MB para uploads gerais (ajuste conforme necessário)
 }); 
-const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // Manter se o app filho ainda usa /upload-audio
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); 
 
 // Configuração da AWS usando variáveis de ambiente
 AWS.config.update({
@@ -43,84 +43,292 @@ AWS.config.update({
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-// Nomes das tabelas DynamoDB
-const DYNAMODB_TABLE_MESSAGES = 'Messages';
-const DYNAMODB_TABLE_LOCATIONS = 'GPSintegracao';
-const DYNAMODB_TABLE_CHILDREN = 'Children';
+// Nomes das tabelas DynamoDB (MANTENDO OS NOMES EXISTENTES E ADICIONANDO 'Conversations')
+const TABLE_CHILDREN = 'Children';
+const TABLE_LOCATIONS = 'GPSintegracao';
+const TABLE_MESSAGES = 'Messages';
+const TABLE_CALLS = process.env.DYNAMODB_TABLE_CALLS || 'parental-monitor-calls'; // Mantido padrão, ajuste se tiver um nome específico
+const TABLE_NOTIFICATIONS = process.env.DYNAMODB_TABLE_NOTIFICATIONS || 'parental-monitor-notifications'; // Mantido padrão, ajuste se tiver um nome específico
+const TABLE_CONVERSATIONS = 'Conversations'; // A nova tabela
 
-// Middlewares Express
+// Middlewares
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json()); // Para JSON no corpo da requisição
+app.use(bodyParser.urlencoded({ extended: true })); // Para dados de formulário URL-encoded
 
-// --- WEBSOCKET SERVERS E HTTP SERVER: DECLARAÇÃO ÚNICA NO TOPO ---
-const server = http.createServer(app); 
+// Cria o servidor HTTP
+const server = http.createServer(app);
 
-const wssGeneralCommands = new WebSocket.Server({ noServer: true }); 
-const wssAudioControl = new WebSocket.Server({ noServer: true }); 
+// Cria o servidor WebSocket anexado ao servidor HTTP
+const wssGeneralCommands = new WebSocket.Server({ noServer: true });
+const wssAudioControl = new WebSocket.Server({ noServer: true });
 
-// Funções auxiliares
-async function updateChildConnectionStatus(childId, connected) {
+// Lida com o upgrade de conexão para WebSockets
+server.on('upgrade', (request, socket, head) => {
+    const pathname = url.parse(request.url).pathname;
+
+    if (pathname === '/ws-general-commands') {
+        wssGeneralCommands.handleUpgrade(request, socket, head, ws => {
+            wssGeneralCommands.emit('connection', ws, request);
+        });
+    } else if (pathname === '/ws-audio-control') {
+        wssAudioControl.handleUpgrade(request, socket, head, ws => {
+            wssAudioControl.emit('connection', ws, request);
+        });
+    } else {
+        socket.destroy();
+    }
+});
+
+// --- FUNÇÃO AUXILIAR PARA ATUALIZAR STATUS DE CONEXÃO DO FILHO NO DYNAMODB ---
+async function updateChildConnectionStatus(childId, isConnected) {
     const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN,
+        TableName: TABLE_CHILDREN,
         Key: { childId: childId },
-        UpdateExpression: 'SET connected = :connected, lastActivity = :lastActivity',
+        UpdateExpression: 'SET isConnected = :val, lastSeen = :ts',
         ExpressionAttributeValues: {
-            ':connected': connected,
-            ':lastActivity': new Date().toISOString()
+            ':val': isConnected,
+            ':ts': Date.now()
         }
     };
     try {
         await docClient.update(params).promise();
-        console.log(`[DynamoDB-Helper] Status de conexão para ${childId} atualizado para ${connected}.`);
+        console.log(`[DynamoDB] Status de conexão do filho ${childId} atualizado para ${isConnected}.`);
     } catch (error) {
-        console.error(`[DynamoDB-Helper] Erro ao atualizar status de conexão para ${childId}:`, error);
+        console.error(`[DynamoDB] Erro ao atualizar status de conexão do filho ${childId}:`, error);
     }
 }
 
-// sendCommandWithRetry foi movido para dentro dos ouvintes de mensagem do WebSocket para ter acesso ao parsedMessage.parentId
-// e usar a lógica de parentListeningToChild corretamente.
+// --- Rotas HTTP ---
 
-// sendS3UrlToParent foi substituída pela lógica direta dentro dos handlers de upload para incorporar o controle parentListeningToChild.
+// Rota de upload de áudio
+app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('Nenhum arquivo de áudio enviado.');
+    }
 
+    const { childId, parentId, timestamp } = req.body;
+    const audioBuffer = req.file.buffer;
+    const audioFileName = `audio/${childId}/${Date.now()}_${uuidv4()}.wav`;
 
-// --- ROTAS HTTP ---
-app.get('/', (req, res) => {
-    res.send('Servidor Parental Monitor Online!');
+    console.log(`[Upload-Audio] Recebendo áudio para childId: ${childId}, parentId: ${parentId}, tamanho: ${audioBuffer.length} bytes`);
+
+    const uploadParams = {
+        Bucket: process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory',
+        Key: audioFileName,
+        Body: audioBuffer,
+        ContentType: 'audio/wav'
+    };
+
+    try {
+        const data = await s3.upload(uploadParams).promise();
+        console.log(`[Upload-Audio] Áudio enviado com sucesso para S3: ${data.Location}`);
+
+        // Enviar URL do S3 de volta para o cliente pai via WebSocket (se houver um pai escutando)
+        const parentWs = parentToWebSocket.get(parentId);
+        if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'audioStreamUrl',
+                childId: childId,
+                url: data.Location,
+                timestamp: timestamp
+            });
+            parentWs.send(message);
+            console.log(`[Upload-Audio] URL do áudio (${data.Location}) enviada para o pai ${parentId}.`);
+        } else {
+            console.warn(`[Upload-Audio] Pai ${parentId} não conectado ou WebSocket não está aberto. Não foi possível enviar a URL do áudio.`);
+        }
+
+        res.status(200).json({ message: 'Áudio recebido e enviado para S3.', url: data.Location, childId: childId });
+    } catch (error) {
+        console.error('[Upload-Audio] Erro ao enviar áudio para S3:', error);
+        res.status(500).send('Erro ao processar o áudio.');
+    }
 });
 
+// Rota de upload de mídia geral (imagens, vídeos)
+app.post('/upload-media', upload.single('media'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('Nenhum arquivo de mídia enviado.');
+    }
+
+    const { childId, parentId, mediaType, timestamp } = req.body; // mediaType: 'image', 'video'
+    const mediaBuffer = req.file.buffer;
+    const originalname = req.file.originalname;
+    const fileExtension = originalname.split('.').pop();
+    const mediaFileName = `${mediaType}/${childId}/${Date.now()}_${uuidv4()}.${fileExtension}`;
+    const contentType = req.file.mimetype;
+
+    console.log(`[Upload-Media] Recebendo ${mediaType} para childId: ${childId}, parentId: ${parentId}, tamanho: ${mediaBuffer.length} bytes, tipo: ${contentType}`);
+
+    const uploadParams = {
+        Bucket: process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory',
+        Key: mediaFileName,
+        Body: mediaBuffer,
+        ContentType: contentType
+    };
+
+    try {
+        const data = await s3.upload(uploadParams).promise();
+        console.log(`[Upload-Media] Mídia enviada com sucesso para S3: ${data.Location}`);
+
+        // Opcional: Notificar o pai sobre a nova mídia
+        const parentWs = parentToWebSocket.get(parentId);
+        if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'mediaUploaded',
+                childId: childId,
+                mediaType: mediaType,
+                url: data.Location,
+                timestamp: timestamp
+            });
+            parentWs.send(message);
+            console.log(`[Upload-Media] URL da mídia (${data.Location}) enviada para o pai ${parentId}.`);
+        }
+
+        res.status(200).json({ message: 'Mídia recebida e enviada para S3.', url: data.Location, childId: childId, mediaType: mediaType });
+    } catch (error) {
+        console.error('[Upload-Media] Erro ao enviar mídia para S3:', error);
+        res.status(500).send('Erro ao processar a mídia.');
+    }
+});
+
+// Rota de registro de filho
 app.post('/register-child', async (req, res) => {
-    const { childId, parentId, childName } = req.body;
+    const { childId, parentId, childName, childToken, childImage } = req.body;
+    console.log(`[Register] Tentativa de registro: childId=${childId}, parentId=${parentId}, childName=${childName}`);
+
     if (!childId || !parentId || !childName) {
         return res.status(400).send('childId, parentId e childName são obrigatórios.');
     }
+
     const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN,
+        TableName: TABLE_CHILDREN,
         Item: {
             childId: childId,
             parentId: parentId,
             childName: childName,
-            connected: false,
-            lastActivity: new Date().toISOString()
+            childToken: childToken || 'N/A',
+            childImage: childImage || null,
+            lastSeen: Date.now(),
+            isConnected: true // Define como conectado no registro
         }
     };
+
     try {
         await docClient.put(params).promise();
-        console.log(`Filho ${childName} (ID: ${childId}) registrado com sucesso para o pai ${parentId}.`);
-        res.status(200).send('Filho registrado com sucesso!');
+        console.log(`[Register] Filho ${childName} (${childId}) registrado/atualizado com sucesso para o pai ${parentId}.`);
+        res.status(200).json({ message: 'Filho registrado/atualizado com sucesso.', childId: childId });
     } catch (error) {
-        console.error('Erro ao registrar filho:', error);
-        res.status(500).send('Erro ao registrar filho.');
+        console.error('[Register] Erro ao registrar filho no DynamoDB:', error);
+        res.status(500).send('Erro interno do servidor.');
     }
 });
 
+// --- Rota para receber notificações (incluindo mensagens WhatsApp) ---
+app.post('/send-notification', async (req, res) => {
+    console.log('[Notification] Recebendo notificação:', req.body);
+    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body;
+
+    if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction) {
+        console.error('[Notification] Dados de notificação incompletos:', req.body);
+        return res.status(400).send('Dados de notificação incompletos. Campos obrigatórios: childId, message, messageType, timestamp, contactOrGroup, direction.');
+    }
+
+    try {
+        let conversationId;
+
+        // 1. Tentar encontrar a conversa existente
+        const getConversationParams = {
+            TableName: TABLE_CONVERSATIONS,
+            Key: {
+                childId: childId,
+                contactOrGroup: contactOrGroup
+            }
+        };
+        const existingConversationData = await docClient.get(getConversationParams).promise();
+
+        if (existingConversationData.Item) {
+            // Conversa encontrada
+            const conversation = existingConversationData.Item;
+            conversationId = conversation.conversationId;
+            console.log(`[Notification] Conversa existente encontrada para childId: ${childId}, contactOrGroup: ${contactOrGroup}, conversationId: ${conversationId}`);
+
+            // Atualizar lastMessageTimestamp e lastMessageSnippet
+            const updateConversationParams = {
+                TableName: TABLE_CONVERSATIONS,
+                Key: {
+                    childId: childId,
+                    contactOrGroup: contactOrGroup
+                },
+                UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet',
+                ExpressionAttributeValues: {
+                    ':ts': timestamp,
+                    ':snippet': message.substring(0, 100) + (message.length > 100 ? '...' : '')
+                }
+            };
+            await docClient.update(updateConversationParams).promise();
+            console.log(`[Notification] Conversa atualizada: ${conversationId}`);
+
+        } else {
+            // Nenhuma conversa encontrada, criar uma nova
+            conversationId = uuidv4();
+            const newConversationParams = {
+                TableName: TABLE_CONVERSATIONS,
+                Item: {
+                    id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Conversations
+                    conversationId: conversationId, 
+                    childId: childId,
+                    contactOrGroup: contactOrGroup,
+                    lastMessageTimestamp: timestamp,
+                    lastMessageSnippet: message.substring(0, 100) + (message.length > 100 ? '...' : ''),
+                    createdAt: Date.now()
+                }
+            };
+            await docClient.put(newConversationParams).promise();
+            console.log(`[Notification] Nova conversa criada: ${conversationId} para childId: ${childId}, contactOrGroup: ${contactOrGroup}`);
+        }
+
+        // 2. Salvar a mensagem individual na tabela de mensagens
+        const messageItem = {
+            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
+            messageId: uuidv4(), 
+            conversationId: conversationId, 
+            childId: childId, 
+            contactOrGroup: contactOrGroup, 
+            messageText: message,
+            timestamp: timestamp,
+            direction: direction,
+            messageType: messageType, 
+            phoneNumber: phoneNumber || 'unknown_number' 
+        };
+
+        const putMessageParams = {
+            TableName: TABLE_MESSAGES,
+            Item: messageItem
+        };
+        await docClient.put(putMessageParams).promise();
+        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId}`);
+
+        res.status(200).send('Notificação recebida e processada.');
+
+    } catch (error) {
+        console.error('[Notification] Erro ao processar notificação:', error);
+        // CORREÇÃO: Enviar um status de erro válido e a mensagem de erro
+        res.status(500).send(`Erro interno do servidor ao processar notificação: ${error.message}`);
+    }
+});
+
+
+// Rotas para buscar dados (com nomes de tabela corrigidos)
 app.get('/get-registered-children', async (req, res) => {
     try {
-        const params = { TableName: DYNAMODB_TABLE_CHILDREN };
+        const params = { TableName: TABLE_CHILDREN };
         const data = await docClient.scan(params).promise();
-        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela 'Children'. Encontrados ${data.Items.length} filhos.`);
+        console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela '${TABLE_CHILDREN}'. Encontrados ${data.Items.length} filhos.`);
         const childrenWithStatus = data.Items.map(child => ({
             ...child,
-            connected: childToWebSocket.has(child.childId)
+            connected: childToWebSocket.has(child.childId) // Verifica se está conectado via WebSocket
         }));
         res.status(200).json(childrenWithStatus);
     } catch (error) {
@@ -131,37 +339,56 @@ app.get('/get-registered-children', async (req, res) => {
 
 app.get('/conversations/:parentId', async (req, res) => {
     const { parentId } = req.params;
-    const params = {
-        TableName: DYNAMODB_TABLE_CHILDREN, 
-        FilterExpression: 'parentId = :parentId',
-        ExpressionAttributeValues: { ':parentId': parentId }
-    };
     try {
-        const data = await docClient.scan(params).promise();
-        const conversations = data.Items.map(item => ({
-            childId: item.childId,
-            childName: item.childName,
-            lastActivity: item.lastActivity,
-            connected: childToWebSocket.has(item.childId),
-            parentId: item.parentId
-        }));
-        res.status(200).json(conversations);
+        const getChildrenParams = {
+            TableName: TABLE_CHILDREN,
+            FilterExpression: 'parentId = :parentId',
+            ExpressionAttributeValues: { ':parentId': parentId }
+        };
+        const childrenData = await docClient.scan(getChildrenParams).promise();
+        const childIds = childrenData.Items.map(child => child.childId);
+
+        if (childIds.length === 0) {
+            return res.status(200).json([]);
+        }
+
+        const conversationsPromises = childIds.map(async (childId) => {
+            const getConversationsForChildParams = {
+                TableName: TABLE_CONVERSATIONS,
+                KeyConditionExpression: 'childId = :childId',
+                ExpressionAttributeValues: { ':childId': childId }
+            };
+            const data = await docClient.query(getConversationsForChildParams).promise();
+            return data.Items.map(conv => ({
+                ...conv,
+                childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido'
+            }));
+        });
+
+        const allConversations = (await Promise.all(conversationsPromises)).flat();
+        res.status(200).json(allConversations);
+
     } catch (error) {
         console.error('Erro ao obter conversas:', error);
         res.status(500).send('Erro ao obter conversas.');
     }
 });
 
-app.get('/messages/:conversationId', async (req, res) => {
-    const { conversationId } = req.params;
+
+app.get('/messages/:childId/:contactOrGroup', async (req, res) => {
+    const { childId, contactOrGroup } = req.params;
     const params = {
-        TableName: DYNAMODB_TABLE_MESSAGES,
-        KeyConditionExpression: 'conversationId = :conversationId',
-        ExpressionAttributeValues: { ':conversationId': conversationId },
-        ScanIndexForward: true,
+        TableName: TABLE_MESSAGES,
+        FilterExpression: 'childId = :childId AND contactOrGroup = :contactOrGroup',
+        ExpressionAttributeValues: {
+            ':childId': childId,
+            ':contactOrGroup': contactOrGroup
+        },
+        ScanIndexForward: true, 
     };
     try {
-        const data = await docClient.query(params).promise();
+        const data = await docClient.scan(params).promise(); 
+        data.Items.sort((a, b) => a.timestamp - b.timestamp);
         res.status(200).json(data.Items);
     } catch (error) {
         console.error('Erro ao obter mensagens:', error);
@@ -169,10 +396,11 @@ app.get('/messages/:conversationId', async (req, res) => {
     }
 });
 
+
 app.get('/locations/:childId', async (req, res) => {
     const { childId } = req.params;
     const params = {
-        TableName: DYNAMODB_TABLE_LOCATIONS,
+        TableName: TABLE_LOCATIONS,
         KeyConditionExpression: 'childId = :childId',
         ExpressionAttributeValues: { ':childId': childId },
         ScanIndexForward: true,
@@ -187,92 +415,10 @@ app.get('/locations/:childId', async (req, res) => {
     }
 });
 
-app.post('/send-notification', async (req, res) => {
-    const { recipientChildId, title, body } = req.body;
-    if (!recipientChildId || !title || !body) {
-        return res.status(400).send('Dados incompletos para enviar notificação.');
-    }
-    try {
-        const params = { TableName: DYNAMODB_TABLE_CHILDREN, Key: { childId: recipientChildId } };
-        const data = await docClient.get(params).promise();
-        const child = data.Item;
-        if (!child || !child.childToken) {
-            return res.status(404).send('Filho não encontrado ou sem token FCM registrado.');
-        }
-        const fcmToken = child.childToken;
-        console.log(`[FCM] Simulação: Notificação '${title}' para ${fcmToken} (${recipientChildId})`);
-        res.status(200).send('Notificação processada (requer integração Firebase Admin).');
-    } catch (error) {
-        console.error('Erro ao enviar notificação:', error);
-        res.status(500).send('Erro interno do servidor ao enviar notificação.');
-    }
-});
-
-// REMOVIDO: A rota /upload-media genérica duplicada que estava abaixo.
-// app.post('/upload-media', upload.single('media'), async (req, res) => { ... });
-
 app.get('/twilio-token', (req, res) => {
     console.log("Requisição para Twilio token recebida. Retornando placeholder.");
     res.status(200).json({ token: 'seu_token_do_twilio_aqui' });
 });
-
-// --- ROTA PARA RECEBER ÁUDIO VIA HTTP POST (do app filho) ---
-app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
-    try {
-        const childId = req.body.childId || 'unknown_child';
-        const parentIdFromChild = req.body.parentId || 'unknown_parent'; 
-        const timestamp = Date.now();
-        const filename = `audios/${childId}/${timestamp}.wav`; 
-
-        if (!req.file || !req.file.buffer) {
-            console.error('[HTTP-Upload-Audio] Nenhum arquivo de áudio recebido do filho:', childId);
-            return res.status(400).send('Nenhum arquivo de áudio recebido.');
-        }
-
-        const bucketName = process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'; 
-        
-        const s3Params = {
-            Bucket: bucketName, 
-            Key: filename, 
-            Body: req.file.buffer, 
-            ContentType: 'audio/wav', 
-            // CORREÇÃO FINAL: Removido ACL: 'private' - se o bucket não permite ACLs, NENHUMA operação pode usar.
-            // A acessibilidade é definida EXCLUSIVAMENTE pela política do bucket (se "PublicReadForGetObject" ou similar).
-        };
-
-        const s3Result = await s3.upload(s3Params).promise();
-
-        console.log(`[HTTP-Upload-Audio] Áudio recebido de ${childId} e salvo em S3 como ${filename}. URL: ${s3Result.Location}`);
-
-        // --- NOVO CONTROLE: Verificar se o pai está ouvindo este filho ---
-        const parentIsListeningToThisChild = parentListeningToChild.get(parentIdFromChild);
-        if (parentIsListeningToThisChild === childId) {
-            const parentWs = parentToWebSocket.get(parentIdFromChild);
-            if (parentWs && parentWs.readyState === WebSocket.OPEN) {
-                const message = JSON.stringify({
-                    type: 'audioStreamUrl', 
-                    childId: childId,
-                    url: s3Result.Location
-                });
-                parentWs.send(message);
-                console.log(`[WS-Parent] URL S3 de áudio enviada para o pai "${parentIdFromChild}" para filho "${childId}": ${s3Result.Location}`);
-            } else {
-                console.warn(`[WS-Parent] App Pai "${parentIdFromChild}" não conectado ou WebSocket não está aberto. Não foi possível enviar URL S3.`);
-            }
-        } else {
-            console.log(`[WS-Parent] Pai ${parentIdFromChild} NÃO está ouvindo ativamente o filho ${childId}. URL de áudio ignorada.`);
-            // Opcional: Se o pai não está ouvindo, podemos tentar parar a gravação deste filho
-            // para evitar uploads desnecessários. Isso exigiria enviar um comando 'stopAudioStreamFromServer'
-            // para o childId via activeAudioControlClients. Mas é mais complexo para um simples upload.
-        }
-
-        res.status(200).json({ message: 'Áudio salvo com sucesso!', url: s3Result.Location, childId: childId });
-    } catch (error) {
-        console.error('[HTTP-Upload-Audio] Erro ao fazer upload de áudio:', error);
-        res.status(500).send('Erro ao salvar áudio.');
-    }
-});
-
 
 app.use((req, res, next) => {
     console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
@@ -282,25 +428,6 @@ app.use((req, res, next) => {
 app.use((err, req, res, next) => {
     console.error('Erro interno do servidor:', err);
     res.status(500).send('Erro interno do servidor.');
-});
-
-
-// Lidar com upgrade de HTTP para WebSocket (já existente)
-server.on('upgrade', (request, socket, head) => {
-    const { pathname } = url.parse(request.url);
-    console.log(`[HTTP-Upgrade] Tentativa de upgrade para pathname: ${pathname}`);
-
-    if (pathname === '/ws-general-commands') {
-        wssGeneralCommands.handleUpgrade(request, socket, head, ws => {
-            wssGeneralCommands.emit('connection', ws, request);
-        });
-    } else if (pathname === '/ws-audio-control') {
-        wssAudioControl.handleUpgrade(request, socket, head, ws => {
-            wssAudioControl.emit('connection', ws, request);
-        });
-    } else {
-        socket.destroy(); 
-    }
 });
 
 
@@ -325,7 +452,6 @@ function sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog,
             }, delay);
         } else {
             console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' para filho ${childId} após ${maxRetries} tentativas no mapa ${mapNameForLog} WS.`);
-            // Envia um erro para o pai se o comando falhar
             const parentWs = parentToWebSocket.get(commandMessage.parentId); 
             if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                 parentWs.send(JSON.stringify({
@@ -451,6 +577,7 @@ wssGeneralCommands.on('connection', ws => {
                             ws.id = effectiveChildId; 
                         }
 
+                        // AGORA A FUNÇÃO updateChildConnectionStatus ESTÁ DEFINIDA!
                         await updateChildConnectionStatus(ws.currentChildId, true);
                         console.log(`[DynamoDB] Filho ${ws.currentChildName} (${ws.currentChildId}) status de conexão atualizado para 'true'.`);
                         console.log(`[WebSocket-Manager] Filho conectado e identificado: ID: ${ws.currentChildId}. Total de entradas ativas: ${activeConnections.size}. Filhos conectados (General WS): ${Array.from(childToWebSocket.keys()).join(', ')}`);
@@ -480,9 +607,10 @@ wssGeneralCommands.on('connection', ws => {
                     console.log(`[Location] Localização recebida do filho ${locChildId}: Lat ${effectiveLatitude}, Lng ${effectiveLongitude}`);
 
                     const locationParams = {
-                        TableName: DYNAMODB_TABLE_LOCATIONS,
+                        TableName: TABLE_LOCATIONS,
                         Item: {
-                            locationId: uuidv4(),
+                            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela GPSintegracao
+                            locationId: uuidv4(), // Mantido, se for um campo adicional
                             childId: locChildId,
                             latitude: effectiveLatitude,
                             longitude: effectiveLongitude,
@@ -521,19 +649,20 @@ wssGeneralCommands.on('connection', ws => {
                     console.log(`[Chat] Mensagem de ${senderName} (${senderId}) para ${receiverIdFromPayload}: ${chatMessageContent}`);
 
                     const messageParams = {
-                        TableName: DYNAMODB_TABLE_MESSAGES,
+                        TableName: TABLE_MESSAGES,
                         Item: {
-                            conversationId: [ws.currentParentId, ws.currentChildId].filter(Boolean).sort().join('-'), 
-                            messageId: uuidv4(),
-                            parentId: ws.currentParentId || receiverIdFromPayload, 
-                            childId: ws.currentChildId || receiverIdFromPayload, 
-                            sender: senderId,
-                            message: chatMessageContent,
-                            timestamp: new Date().toISOString()
+                            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
+                            messageId: uuidv4(), 
+                            senderId: senderId,
+                            receiverId: receiverIdFromPayload,
+                            messageText: chatMessageContent,
+                            timestamp: new Date().toISOString(),
+                            messageType: 'APP_CHAT_MESSAGE'
                         }
                     };
                     await docClient.put(messageParams).promise();
-                    console.log(`[DynamoDB] Mensagem de chat salva de ${senderId} para ${receiverIdFromPayload}.`);
+                    console.log(`[DynamoDB] Mensagem de chat interna salva de ${senderId} para ${receiverIdFromPayload}.`);
+
 
                     if (targetWsReceiver && targetWsReceiver.readyState === WebSocket.OPEN) {
                         targetWsReceiver.send(JSON.stringify({
@@ -556,7 +685,6 @@ wssGeneralCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de localização inválida.' }));
                         return;
                     }
-                    // Adicione a lógica de sendCommandWithRetry aqui, com o parentId correto do payload
                     sendCommandWithRetry(reqLocChildId, { type: 'startLocationUpdates', parentId: effectiveParentId }, childToWebSocket, 'General');
                     ws.send(JSON.stringify({ type: 'info', message: `Solicitando localização para ${reqLocChildId}.` }));
                     break;
@@ -569,7 +697,6 @@ wssGeneralCommands.on('connection', ws => {
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
                         return;
                     }
-                    // Adicione a lógica de sendCommandWithRetry aqui, com o parentId correto do payload
                     sendCommandWithRetry(stopLocChildId, { type: 'stopLocationUpdates', parentId: effectiveParentId }, childToWebSocket, 'General');
                     ws.send(JSON.stringify({
                         type: 'locationCommandStatus',
@@ -581,9 +708,8 @@ wssGeneralCommands.on('connection', ws => {
                 case 'startAudioStream': 
                     console.log(`[WS-General] Comando 'startAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdAudioCommand = effectiveChildId;
-                    const parentIdForAudio = effectiveParentId; // Use o parentId do payload
+                    const parentIdForAudio = effectiveParentId;
 
-                    // --- NOVO: Registra qual filho o pai está ouvindo ativamente ---
                     parentListeningToChild.set(parentIdForAudio, targetChildIdAudioCommand);
                     console.log(`[WS-General] Pai ${parentIdForAudio} AGORA está ouvindo o filho ${targetChildIdAudioCommand}.`);
 
@@ -600,13 +726,12 @@ wssGeneralCommands.on('connection', ws => {
                 case 'stopAudioStream': 
                     console.log(`[WS-General] Comando 'stopAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
                     const targetChildIdStopAudio = effectiveChildId;
-                    const parentIdForStopAudio = effectiveParentId; // Use o parentId do payload
+                    const parentIdForStopAudio = effectiveParentId;
 
                     sendCommandWithRetry(targetChildIdStopAudio, { type: 'stopAudioStreamFromServer', parentId: parentIdForStopAudio }, activeAudioControlClients, 'AudioControl', 5, 500, 0); 
 
-                    // --- NOVO: Remove o registro de qual filho o pai está ouvindo ---
                     parentListeningToChild.delete(parentIdForStopAudio);
-                    console.log(`[WS-General] Pai ${parentIdForStopAudio} parou de ouvir o filho ${targetChildIdStopAudio}. Registro removido.`);
+                    console.log(`[WS-General] Pai ${parentIdForStopAudio} desconectado. Registro de escuta limpo.`);
 
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
@@ -646,7 +771,6 @@ wssGeneralCommands.on('connection', ws => {
             } catch (error) {
                 console.error('Erro ao atualizar status de conexão do filho no DynamoDB:', error);
             }
-            // --- NOVO: Limpa o registro de escuta de qualquer pai que estivesse ouvindo este filho ---
             for (let [parentId, listeningChildId] of parentListeningToChild.entries()) {
                 if (listeningChildId === ws.currentChildId) {
                     parentListeningToChild.delete(parentId);
@@ -661,7 +785,6 @@ wssGeneralCommands.on('connection', ws => {
                 console.warn(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} não encontrado ou já substituído no parentToWebSocket.`);
             }
              console.log(`[WebSocket-General] Pai ${ws.currentParentId} desconectado.`);
-            // --- NOVO: Limpa o registro do que este pai estava ouvindo ---
             parentListeningToChild.delete(ws.currentParentId);
             console.log(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} desconectado. Registro de escuta limpo.`);
         } else {
@@ -804,10 +927,16 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`);
     console.log(`Endpoint de upload de áudio: http://localhost:${PORT}/upload-audio`);
     console.log(`Endpoint de upload de mídia (geral): http://localhost:${PORT}/upload-media`);
+    console.log(`Endpoint de registro de filho: http://localhost:${PORT}/register-child`);
+    console.log(`Endpoint de notificação (WhatsApp): http://localhost:${PORT}/send-notification`);
     console.log(`WebSocket de comandos gerais em: ws://localhost:${PORT}/ws-general-commands`);
     console.log(`WebSocket de controle de áudio em: ws://localhost:${PORT}/ws-audio-control`);
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
     console.log(`Bucket S3 configurado via env: ${process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory'}`);
-    console.log(`AWS Access Key ID configurada via env: ${process.env.AWS_ACCESS_KEY_ID ? 'Sim' : 'Não'}`);
-    console.log(`AWS Secret Access Key configurada via env: ${process.env.AWS_SECRET_ACCESS_KEY ? 'Sim' : 'Não'}`);
+    console.log(`Tabela DynamoDB CHILDREN: ${TABLE_CHILDREN}`);
+    console.log(`Tabela DynamoDB LOCATIONS: ${TABLE_LOCATIONS}`);
+    console.log(`Tabela DynamoDB MESSAGES: ${TABLE_MESSAGES}`);
+    console.log(`Tabela DynamoDB CALLS: ${TABLE_CALLS}`);
+    console.log(`Tabela DynamoDB NOTIFICATIONS: ${TABLE_NOTIFICATIONS}`);
+    console.log(`Tabela DynamoDB CONVERSATIONS: ${TABLE_CONVERSATIONS}`);
 });

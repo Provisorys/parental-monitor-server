@@ -228,7 +228,8 @@ app.post('/register-child', async (req, res) => {
 // --- Rota para receber notificações (incluindo mensagens WhatsApp) ---
 app.post('/send-notification', async (req, res) => {
     console.log('[Notification] Recebendo notificação:', req.body);
-    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body;
+    // Adicionado messageType aqui para ser usado ao salvar/atualizar a conversa
+    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body; 
 
     if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction) {
         console.error('[Notification] Dados de notificação incompletos:', req.body);
@@ -254,17 +255,18 @@ app.post('/send-notification', async (req, res) => {
             conversationId = conversation.conversationId;
             console.log(`[Notification] Conversa existente encontrada para childId: ${childId}, contactOrGroup: ${contactOrGroup}, conversationId: ${conversationId}`);
 
-            // Atualizar lastMessageTimestamp e lastMessageSnippet
+            // Atualizar lastMessageTimestamp, lastMessageSnippet E lastMessageType
             const updateConversationParams = {
                 TableName: TABLE_CONVERSATIONS,
                 Key: {
                     childId: childId,
                     contactOrGroup: contactOrGroup
                 },
-                UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet',
+                UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet, lastMessageType = :msgType', // NOVO: lastMessageType
                 ExpressionAttributeValues: {
                     ':ts': timestamp,
-                    ':snippet': message.substring(0, 100) + (message.length > 100 ? '...' : '')
+                    ':snippet': message.substring(0, 100) + (message.length > 100 ? '...' : ''),
+                    ':msgType': messageType // NOVO: Valor do messageType
                 }
             };
             await docClient.update(updateConversationParams).promise();
@@ -276,12 +278,13 @@ app.post('/send-notification', async (req, res) => {
             const newConversationParams = {
                 TableName: TABLE_CONVERSATIONS,
                 Item: {
-                    id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Conversations
+                    id: uuidv4(),
                     conversationId: conversationId, 
                     childId: childId,
                     contactOrGroup: contactOrGroup,
                     lastMessageTimestamp: timestamp,
                     lastMessageSnippet: message.substring(0, 100) + (message.length > 100 ? '...' : ''),
+                    lastMessageType: messageType, // NOVO: lastMessageType para novas conversas
                     createdAt: Date.now()
                 }
             };
@@ -289,9 +292,9 @@ app.post('/send-notification', async (req, res) => {
             console.log(`[Notification] Nova conversa criada: ${conversationId} para childId: ${childId}, contactOrGroup: ${contactOrGroup}`);
         }
 
-        // 2. Salvar a mensagem individual na tabela de mensagens
+        // 2. Salvar a mensagem individual na tabela de mensagens (já está correto aqui)
         const messageItem = {
-            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
+            id: uuidv4(),
             messageId: uuidv4(), 
             conversationId: conversationId, 
             childId: childId, 
@@ -359,9 +362,12 @@ app.get('/conversations/:parentId', async (req, res) => {
                 ExpressionAttributeValues: { ':childId': childId }
             };
             const data = await docClient.query(getConversationsForChildParams).promise();
+            // Adicionando o messageType da última mensagem aqui
             return data.Items.map(conv => ({
                 ...conv,
-                childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido'
+                childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido',
+                // *** NOVO CAMPO: lastMessageType da última mensagem ***
+                lastMessageType: conv.lastMessageType || 'text' // Adiciona o tipo da última mensagem, padrão 'text'
             }));
         });
 
