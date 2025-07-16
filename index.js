@@ -362,7 +362,6 @@ app.get('/conversations/:parentId', async (req, res) => {
             return data.Items.map(conv => ({
                 ...conv,
                 childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido',
-                // lastMessageType não é mais inferido aqui, vem do que foi salvo
                 lastMessageType: conv.lastMessageType || 'text' // Garante que o tipo é retornado, padrão 'text'
             }));
         });
