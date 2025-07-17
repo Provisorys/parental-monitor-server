@@ -100,8 +100,8 @@ async function updateChildConnectionStatus(childId, isConnected) {
 }
 
 // --- FUNÇÃO AUXILIAR PARA ATUALIZAR CONVERSA (REUTILIZÁVEL) ---
-// MODIFICAÇÃO: Adicionado 'messageDirection' como parâmetro
-async function updateConversation(childId, contactOrGroup, timestamp, messageSnippet, messageType, messageDirection) {
+// Esta função é usada APENAS para mensagens de WhatsApp e outras notificações que precisam de registro.
+async function updateConversation(childId, contactOrGroup, timestamp, messageSnippet, messageType) {
     let conversationId;
     const getConversationParams = {
         TableName: TABLE_CONVERSATIONS,
@@ -117,17 +117,15 @@ async function updateConversation(childId, contactOrGroup, timestamp, messageSni
         const updateConversationParams = {
             TableName: TABLE_CONVERSATIONS,
             Key: { childId: childId, contactOrGroup: contactOrGroup },
-            // MODIFICAÇÃO: Adicionado lastMessageDirection
-            UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet, lastMessageType = :msgType, lastMessageDirection = :msgDirection',
+            UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet, lastMessageType = :msgType',
             ExpressionAttributeValues: {
                 ':ts': timestamp,
                 ':snippet': messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : ''),
-                ':msgType': messageType,
-                ':msgDirection': messageDirection // Salva a direção
+                ':msgType': messageType
             }
         };
         await docClient.update(updateConversationParams).promise();
-        console.log(`[Conversations] Conversa atualizada: ${conversationId} com tipo ${messageType}, direção ${messageDirection}`);
+        console.log(`[Conversations] Conversa atualizada: ${conversationId} com tipo ${messageType}`);
     } else {
         conversationId = uuidv4();
         const newConversationParams = {
@@ -140,12 +138,11 @@ async function updateConversation(childId, contactOrGroup, timestamp, messageSni
                 lastMessageTimestamp: timestamp,
                 lastMessageSnippet: messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : ''),
                 lastMessageType: messageType,
-                lastMessageDirection: messageDirection, // Salva a direção
                 createdAt: Date.now()
             }
         };
         await docClient.put(newConversationParams).promise();
-        console.log(`[Conversations] Nova conversa criada: ${conversationId} para childId: ${childId}, contactOrGroup: ${contactOrGroup} com tipo ${messageType}, direção ${messageDirection}`);
+        console.log(`[Conversations] Nova conversa criada: ${conversationId} para childId: ${childId}, contactOrGroup: ${contactOrGroup} com tipo ${messageType}`);
     }
     return conversationId;
 }
@@ -236,19 +233,17 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         else snippet = "📎 Arquivo"; 
 
         // Atualizar a tabela Conversations com o tipo de mídia
-        // MODIFICAÇÃO: Adicionado 'sent' como direção para uploads de mídia do filho
         if (contactOrGroup) { 
-            await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType, "sent"); 
+            await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType);
         } else {
             console.warn(`[Upload-Media] contactOrGroup não fornecido para atualização da conversa para childId: ${childId}.`);
         }
 
         // Salvar a mensagem individual na tabela de mensagens
-        // MODIFICAÇÃO: Passando "sent" como direção para a mensagem individual
         const messageItem = {
             id: uuidv4(),
             messageId: uuidv4(),
-            conversationId: await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType, "sent"), 
+            conversationId: await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType), 
             childId: childId,
             contactOrGroup: contactOrGroup, 
             messageText: data.Location, 
@@ -317,7 +312,6 @@ app.post('/register-child', async (req, res) => {
 // --- Rota para receber notificações (incluindo mensagens WhatsApp) ---
 app.post('/send-notification', async (req, res) => {
     console.log('[Notification] Recebendo notificação:', req.body);
-    // MODIFICAÇÃO: 'direction' já vem do cliente Android (WhatsAppAccessibilityService)
     const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body; 
 
     if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction) {
@@ -326,8 +320,7 @@ app.post('/send-notification', async (req, res) => {
     }
 
     try {
-        // MODIFICAÇÃO: Passando 'direction' para updateConversation
-        const conversationId = await updateConversation(childId, contactOrGroup, timestamp, message, messageType, direction);
+        const conversationId = await updateConversation(childId, contactOrGroup, timestamp, message, messageType);
 
         // 2. Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
@@ -348,7 +341,7 @@ app.post('/send-notification', async (req, res) => {
             Item: messageItem
         };
         await docClient.put(putMessageParams).promise();
-        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId} com tipo ${messageType}, direção ${direction}`);
+        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId} com tipo ${messageType}`);
 
         res.status(200).send('Notificação recebida e processada.');
 
@@ -398,12 +391,10 @@ app.get('/conversations/:parentId', async (req, res) => {
                 ExpressionAttributeValues: { ':childId': childId }
             };
             const data = await docClient.query(getConversationsForChildParams).promise();
-            // MODIFICAÇÃO: Incluindo lastMessageDirection no retorno
             return data.Items.map(conv => ({
                 ...conv,
                 childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido',
-                lastMessageType: conv.lastMessageType || 'text', 
-                lastMessageDirection: conv.lastMessageDirection || 'unknown' // Adiciona o campo de direção
+                lastMessageType: conv.lastMessageType || 'text' 
             }));
         });
 
