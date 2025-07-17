@@ -101,13 +101,13 @@ async function updateChildConnectionStatus(childId, isConnected) {
 
 // --- Rotas HTTP ---
 
-// Rota de upload de áudio
+// Rota de upload de áudio (NÃO ATUALIZA lastMessageType na Conversations aqui)
 app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de áudio enviado.');
     }
 
-    const { childId, parentId, timestamp } = req.body;
+    const { childId, parentId, timestamp } = req.body; // contactOrGroup não é necessário aqui para Conversations
     const audioBuffer = req.file.buffer;
     const audioFileName = `audio/${childId}/${Date.now()}_${uuidv4()}.wav`;
 
@@ -146,13 +146,13 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     }
 });
 
-// Rota de upload de mídia geral (imagens, vídeos)
+// Rota de upload de mídia geral (imagens, vídeos) (NÃO ATUALIZA lastMessageType na Conversations aqui)
 app.post('/upload-media', upload.single('media'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de mídia enviado.');
     }
 
-    const { childId, parentId, mediaType, timestamp } = req.body; // mediaType: 'image', 'video'
+    const { childId, parentId, mediaType, timestamp } = req.body; // contactOrGroup não é necessário aqui para Conversations
     const mediaBuffer = req.file.buffer;
     const originalname = req.file.originalname;
     const fileExtension = originalname.split('.').pop();
@@ -276,8 +276,8 @@ app.post('/send-notification', async (req, res) => {
             const newConversationParams = {
                 TableName: TABLE_CONVERSATIONS,
                 Item: {
-                    id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Conversations
-                    conversationId: conversationId, 
+                    id: uuidv4(),
+                    conversationId: conversationId,
                     childId: childId,
                     contactOrGroup: contactOrGroup,
                     lastMessageTimestamp: timestamp,
@@ -291,16 +291,16 @@ app.post('/send-notification', async (req, res) => {
 
         // 2. Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
-            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
-            messageId: uuidv4(), 
-            conversationId: conversationId, 
-            childId: childId, 
-            contactOrGroup: contactOrGroup, 
+            id: uuidv4(),
+            messageId: uuidv4(),
+            conversationId: conversationId,
+            childId: childId,
+            contactOrGroup: contactOrGroup,
             messageText: message,
             timestamp: timestamp,
             direction: direction,
-            messageType: messageType, 
-            phoneNumber: phoneNumber || 'unknown_number' 
+            messageType: messageType, // messageType vem do cliente (ex: WHATSAPP_MESSAGE)
+            phoneNumber: phoneNumber || 'unknown_number'
         };
 
         const putMessageParams = {
@@ -314,7 +314,6 @@ app.post('/send-notification', async (req, res) => {
 
     } catch (error) {
         console.error('[Notification] Erro ao processar notificação:', error);
-        // CORREÇÃO: Enviar um status de erro válido e a mensagem de erro
         res.status(500).send(`Erro interno do servidor ao processar notificação: ${error.message}`);
     }
 });
@@ -359,9 +358,11 @@ app.get('/conversations/:parentId', async (req, res) => {
                 ExpressionAttributeValues: { ':childId': childId }
             };
             const data = await docClient.query(getConversationsForChildParams).promise();
+            // Retorna o lastMessageType que foi salvo na tabela Conversations (se existir)
             return data.Items.map(conv => ({
                 ...conv,
-                childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido'
+                childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido',
+                lastMessageType: conv.lastMessageType || 'text' // Garante que o tipo é retornado, padrão 'text'
             }));
         });
 
@@ -563,7 +564,7 @@ wssGeneralCommands.on('connection', ws => {
                             const oldWs = childToWebSocket.get(ws.currentChildId);
                             console.log(`[WS-GENERAL-CONN] Removendo conexão filho antiga para ${ws.currentChildId} (Temp ID: ${oldWs ? oldWs.id : 'N/A'}).`);
                             oldWs.close(1000, 'Nova conexão estabelecida'); 
-                            childToWebSocket.delete(ws.currentChildId);
+                            childToWebSocket.delete(oldWs.id); // CORREÇÃO: Usar oldWs.id para deletar
                             activeConnections.delete(oldWs.id); 
                         }
                         childToWebSocket.set(ws.currentChildId, ws);
