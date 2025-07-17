@@ -99,17 +99,66 @@ async function updateChildConnectionStatus(childId, isConnected) {
     }
 }
 
+// --- FUNÇÃO AUXILIAR PARA ATUALIZAR CONVERSA (REUTILIZÁVEL) ---
+async function updateConversation(childId, contactOrGroup, timestamp, messageSnippet, messageType) {
+    let conversationId;
+    const getConversationParams = {
+        TableName: TABLE_CONVERSATIONS,
+        Key: {
+            childId: childId,
+            contactOrGroup: contactOrGroup
+        }
+    };
+    const existingConversationData = await docClient.get(getConversationParams).promise();
+
+    if (existingConversationData.Item) {
+        conversationId = existingConversationData.Item.conversationId;
+        const updateConversationParams = {
+            TableName: TABLE_CONVERSATIONS,
+            Key: { childId: childId, contactOrGroup: contactOrGroup },
+            UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet, lastMessageType = :msgType',
+            ExpressionAttributeValues: {
+                ':ts': timestamp,
+                ':snippet': messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : ''),
+                ':msgType': messageType
+            }
+        };
+        await docClient.update(updateConversationParams).promise();
+        console.log(`[Conversations] Conversa atualizada: ${conversationId} com tipo ${messageType}`);
+    } else {
+        conversationId = uuidv4();
+        const newConversationParams = {
+            TableName: TABLE_CONVERSATIONS,
+            Item: {
+                id: uuidv4(),
+                conversationId: conversationId,
+                childId: childId,
+                contactOrGroup: contactOrGroup,
+                lastMessageTimestamp: timestamp,
+                lastMessageSnippet: messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : ''),
+                lastMessageType: messageType,
+                createdAt: Date.now()
+            }
+        };
+        await docClient.put(newConversationParams).promise();
+        console.log(`[Conversations] Nova conversa criada: ${conversationId} para childId: ${childId}, contactOrGroup: ${contactOrGroup} com tipo ${messageType}`);
+    }
+    return conversationId;
+}
+
+
 // --- Rotas HTTP ---
 
-// Rota de upload de áudio (NÃO ATUALIZA lastMessageType na Conversations aqui)
+// Rota de upload de áudio
 app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de áudio enviado.');
     }
 
-    const { childId, parentId, timestamp } = req.body; // contactOrGroup não é necessário aqui para Conversations
+    const { childId, parentId, timestamp, contactOrGroup } = req.body; // Adicionado contactOrGroup
     const audioBuffer = req.file.buffer;
     const audioFileName = `audio/${childId}/${Date.now()}_${uuidv4()}.wav`;
+    const messageType = 'audio'; // Definir o tipo de mensagem como 'audio'
 
     console.log(`[Upload-Audio] Recebendo áudio para childId: ${childId}, parentId: ${parentId}, tamanho: ${audioBuffer.length} bytes`);
 
@@ -124,6 +173,30 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
         const data = await s3.upload(uploadParams).promise();
         console.log(`[Upload-Audio] Áudio enviado com sucesso para S3: ${data.Location}`);
 
+        // NOVO: Atualizar a tabela Conversations com o tipo 'audio'
+        if (contactOrGroup) { // Garantir que contactOrGroup foi enviado
+            await updateConversation(childId, contactOrGroup, timestamp, "🎵 Áudio", messageType);
+        } else {
+            console.warn(`[Upload-Audio] contactOrGroup não fornecido para atualização da conversa para childId: ${childId}.`);
+        }
+
+        // NOVO: Salvar a mensagem individual na tabela de mensagens
+        const messageItem = {
+            id: uuidv4(),
+            messageId: uuidv4(),
+            conversationId: await updateConversation(childId, contactOrGroup, timestamp, "🎵 Áudio", messageType), // Reusa a função para obter ID
+            childId: childId,
+            contactOrGroup: contactOrGroup,
+            messageText: data.Location, // Salva a URL do áudio como o 'messageText'
+            timestamp: timestamp,
+            direction: "sent", // Assumindo que o upload é sempre 'sent' do filho
+            messageType: messageType,
+            phoneNumber: "unknown_number" // Ou extrair do body se disponível
+        };
+        await docClient.put(messageItem).promise();
+        console.log(`[Upload-Audio] Mensagem de áudio salva em ${TABLE_MESSAGES}.`);
+
+
         // Enviar URL do S3 de volta para o cliente pai via WebSocket (se houver um pai escutando)
         const parentWs = parentToWebSocket.get(parentId);
         if (parentWs && parentWs.readyState === WebSocket.OPEN) {
@@ -131,7 +204,8 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
                 type: 'audioStreamUrl',
                 childId: childId,
                 url: data.Location,
-                timestamp: timestamp
+                timestamp: timestamp,
+                messageType: messageType // Incluir o tipo para o pai
             });
             parentWs.send(message);
             console.log(`[Upload-Audio] URL do áudio (${data.Location}) enviada para o pai ${parentId}.`);
@@ -139,20 +213,20 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
             console.warn(`[Upload-Audio] Pai ${parentId} não conectado ou WebSocket não está aberto. Não foi possível enviar a URL do áudio.`);
         }
 
-        res.status(200).json({ message: 'Áudio recebido e enviado para S3.', url: data.Location, childId: childId });
+        res.status(200).json({ message: 'Áudio recebido e enviado para S3.', url: data.Location, childId: childId, messageType: messageType });
     } catch (error) {
         console.error('[Upload-Audio] Erro ao enviar áudio para S3:', error);
         res.status(500).send('Erro ao processar o áudio.');
     }
 });
 
-// Rota de upload de mídia geral (imagens, vídeos) (NÃO ATUALIZA lastMessageType na Conversations aqui)
+// Rota de upload de mídia geral (imagens, vídeos)
 app.post('/upload-media', upload.single('media'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de mídia enviado.');
     }
 
-    const { childId, parentId, mediaType, timestamp } = req.body; // contactOrGroup não é necessário aqui para Conversations
+    const { childId, parentId, mediaType, timestamp, contactOrGroup } = req.body; // Adicionado contactOrGroup
     const mediaBuffer = req.file.buffer;
     const originalname = req.file.originalname;
     const fileExtension = originalname.split('.').pop();
@@ -171,6 +245,36 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     try {
         const data = await s3.upload(uploadParams).promise();
         console.log(`[Upload-Media] Mídia enviada com sucesso para S3: ${data.Location}`);
+
+        let snippet = "";
+        if (mediaType === "image") snippet = "📷 Imagem";
+        else if (mediaType === "video") snippet = "🎥 Vídeo";
+        else if (mediaType === "document") snippet = "📄 Documento"; // Se você tiver um tipo 'document' aqui
+        else snippet = "📎 Arquivo"; // Tipo genérico para outros
+
+        // NOVO: Atualizar a tabela Conversations com o tipo de mídia
+        if (contactOrGroup) { // Garantir que contactOrGroup foi enviado
+            await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType);
+        } else {
+            console.warn(`[Upload-Media] contactOrGroup não fornecido para atualização da conversa para childId: ${childId}.`);
+        }
+
+        // NOVO: Salvar a mensagem individual na tabela de mensagens
+        const messageItem = {
+            id: uuidv4(),
+            messageId: uuidv4(),
+            conversationId: await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType), // Reusa a função para obter ID
+            childId: childId,
+            contactOrGroup: contactOrGroup,
+            messageText: data.Location, // Salva a URL da mídia como o 'messageText'
+            timestamp: timestamp,
+            direction: "sent", // Assumindo que o upload é sempre 'sent' do filho
+            messageType: mediaType,
+            phoneNumber: "unknown_number" // Ou extrair do body se disponível
+        };
+        await docClient.put(messageItem).promise();
+        console.log(`[Upload-Media] Mensagem de mídia salva em ${TABLE_MESSAGES}.`);
+
 
         // Opcional: Notificar o pai sobre a nova mídia
         const parentWs = parentToWebSocket.get(parentId);
@@ -228,7 +332,8 @@ app.post('/register-child', async (req, res) => {
 // --- Rota para receber notificações (incluindo mensagens WhatsApp) ---
 app.post('/send-notification', async (req, res) => {
     console.log('[Notification] Recebendo notificação:', req.body);
-    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body;
+    // messageType já vem do cliente Android (WhatsAppAccessibilityService)
+    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body; 
 
     if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction) {
         console.error('[Notification] Dados de notificação incompletos:', req.body);
@@ -236,71 +341,21 @@ app.post('/send-notification', async (req, res) => {
     }
 
     try {
-        let conversationId;
-
-        // 1. Tentar encontrar a conversa existente
-        const getConversationParams = {
-            TableName: TABLE_CONVERSATIONS,
-            Key: {
-                childId: childId,
-                contactOrGroup: contactOrGroup
-            }
-        };
-        const existingConversationData = await docClient.get(getConversationParams).promise();
-
-        if (existingConversationData.Item) {
-            // Conversa encontrada
-            const conversation = existingConversationData.Item;
-            conversationId = conversation.conversationId;
-            console.log(`[Notification] Conversa existente encontrada para childId: ${childId}, contactOrGroup: ${contactOrGroup}, conversationId: ${conversationId}`);
-
-            // Atualizar lastMessageTimestamp e lastMessageSnippet
-            const updateConversationParams = {
-                TableName: TABLE_CONVERSATIONS,
-                Key: {
-                    childId: childId,
-                    contactOrGroup: contactOrGroup
-                },
-                UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet',
-                ExpressionAttributeValues: {
-                    ':ts': timestamp,
-                    ':snippet': message.substring(0, 100) + (message.length > 100 ? '...' : '')
-                }
-            };
-            await docClient.update(updateConversationParams).promise();
-            console.log(`[Notification] Conversa atualizada: ${conversationId}`);
-
-        } else {
-            // Nenhuma conversa encontrada, criar uma nova
-            conversationId = uuidv4();
-            const newConversationParams = {
-                TableName: TABLE_CONVERSATIONS,
-                Item: {
-                    id: uuidv4(),
-                    conversationId: conversationId,
-                    childId: childId,
-                    contactOrGroup: contactOrGroup,
-                    lastMessageTimestamp: timestamp,
-                    lastMessageSnippet: message.substring(0, 100) + (message.length > 100 ? '...' : ''),
-                    createdAt: Date.now()
-                }
-            };
-            await docClient.put(newConversationParams).promise();
-            console.log(`[Notification] Nova conversa criada: ${conversationId} para childId: ${childId}, contactOrGroup: ${contactOrGroup}`);
-        }
+        // Reutiliza a função auxiliar para atualizar/criar a conversa
+        const conversationId = await updateConversation(childId, contactOrGroup, timestamp, message, messageType);
 
         // 2. Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
             id: uuidv4(),
-            messageId: uuidv4(),
-            conversationId: conversationId,
-            childId: childId,
-            contactOrGroup: contactOrGroup,
+            messageId: uuidv4(), 
+            conversationId: conversationId, 
+            childId: childId, 
+            contactOrGroup: contactOrGroup, 
             messageText: message,
             timestamp: timestamp,
             direction: direction,
-            messageType: messageType, // messageType vem do cliente (ex: WHATSAPP_MESSAGE)
-            phoneNumber: phoneNumber || 'unknown_number'
+            messageType: messageType, 
+            phoneNumber: phoneNumber || 'unknown_number' 
         };
 
         const putMessageParams = {
@@ -308,12 +363,13 @@ app.post('/send-notification', async (req, res) => {
             Item: messageItem
         };
         await docClient.put(putMessageParams).promise();
-        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId}`);
+        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId} com tipo ${messageType}`);
 
         res.status(200).send('Notificação recebida e processada.');
 
     } catch (error) {
         console.error('[Notification] Erro ao processar notificação:', error);
+        // CORREÇÃO: Enviar um status de erro válido e a mensagem de erro
         res.status(500).send(`Erro interno do servidor ao processar notificação: ${error.message}`);
     }
 });
@@ -358,11 +414,11 @@ app.get('/conversations/:parentId', async (req, res) => {
                 ExpressionAttributeValues: { ':childId': childId }
             };
             const data = await docClient.query(getConversationsForChildParams).promise();
-            // Retorna o lastMessageType que foi salvo na tabela Conversations (se existir)
+            // Retornando o lastMessageType que foi salvo na tabela Conversations
             return data.Items.map(conv => ({
                 ...conv,
                 childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido',
-                lastMessageType: conv.lastMessageType || 'text' // Garante que o tipo é retornado, padrão 'text'
+                lastMessageType: conv.lastMessageType || 'text' // Garante que o tipo é retornado
             }));
         });
 
