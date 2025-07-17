@@ -100,13 +100,14 @@ async function updateChildConnectionStatus(childId, isConnected) {
 }
 
 // --- FUNÇÃO AUXILIAR PARA ATUALIZAR CONVERSA (REUTILIZÁVEL) ---
+// Esta função é usada APENAS para mensagens de WhatsApp e outras notificações que precisam de registro.
 async function updateConversation(childId, contactOrGroup, timestamp, messageSnippet, messageType) {
     let conversationId;
     const getConversationParams = {
         TableName: TABLE_CONVERSATIONS,
         Key: {
             childId: childId,
-            contactOrGroup: contactOrGroup
+            contactOrGroup: contactOrGroup 
         }
     };
     const existingConversationData = await docClient.get(getConversationParams).promise();
@@ -149,16 +150,16 @@ async function updateConversation(childId, contactOrGroup, timestamp, messageSni
 
 // --- Rotas HTTP ---
 
-// Rota de upload de áudio
+// Rota de upload de áudio (APENAS PARA STREAMING - SEM REGISTRO NO DYNAMODB)
 app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de áudio enviado.');
     }
 
-    const { childId, parentId, timestamp, contactOrGroup } = req.body; // Adicionado contactOrGroup
+    const { childId, parentId, timestamp } = req.body; // contactOrGroup não é necessário aqui
     const audioBuffer = req.file.buffer;
     const audioFileName = `audio/${childId}/${Date.now()}_${uuidv4()}.wav`;
-    const messageType = 'audio'; // Definir o tipo de mensagem como 'audio'
+    const messageType = 'audio_stream'; // Usar um tipo diferente para diferenciar do WhatsApp
 
     console.log(`[Upload-Audio] Recebendo áudio para childId: ${childId}, parentId: ${parentId}, tamanho: ${audioBuffer.length} bytes`);
 
@@ -173,29 +174,8 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
         const data = await s3.upload(uploadParams).promise();
         console.log(`[Upload-Audio] Áudio enviado com sucesso para S3: ${data.Location}`);
 
-        // NOVO: Atualizar a tabela Conversations com o tipo 'audio'
-        if (contactOrGroup) { // Garantir que contactOrGroup foi enviado
-            await updateConversation(childId, contactOrGroup, timestamp, "🎵 Áudio", messageType);
-        } else {
-            console.warn(`[Upload-Audio] contactOrGroup não fornecido para atualização da conversa para childId: ${childId}.`);
-        }
-
-        // NOVO: Salvar a mensagem individual na tabela de mensagens
-        const messageItem = {
-            id: uuidv4(),
-            messageId: uuidv4(),
-            conversationId: await updateConversation(childId, contactOrGroup, timestamp, "🎵 Áudio", messageType), // Reusa a função para obter ID
-            childId: childId,
-            contactOrGroup: contactOrGroup,
-            messageText: data.Location, // Salva a URL do áudio como o 'messageText'
-            timestamp: timestamp,
-            direction: "sent", // Assumindo que o upload é sempre 'sent' do filho
-            messageType: messageType,
-            phoneNumber: "unknown_number" // Ou extrair do body se disponível
-        };
-        await docClient.put(messageItem).promise();
-        console.log(`[Upload-Audio] Mensagem de áudio salva em ${TABLE_MESSAGES}.`);
-
+        // REMOVIDO: updateConversation e docClient.put(messageItem) para este fluxo de áudio de streaming.
+        // Este áudio NÃO é para ser salvo nas tabelas de conversas/mensagens.
 
         // Enviar URL do S3 de volta para o cliente pai via WebSocket (se houver um pai escutando)
         const parentWs = parentToWebSocket.get(parentId);
@@ -226,7 +206,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         return res.status(400).send('Nenhum arquivo de mídia enviado.');
     }
 
-    const { childId, parentId, mediaType, timestamp, contactOrGroup } = req.body; // Adicionado contactOrGroup
+    const { childId, parentId, mediaType, timestamp, contactOrGroup } = req.body; 
     const mediaBuffer = req.file.buffer;
     const originalname = req.file.originalname;
     const fileExtension = originalname.split('.').pop();
@@ -249,28 +229,28 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         let snippet = "";
         if (mediaType === "image") snippet = "📷 Imagem";
         else if (mediaType === "video") snippet = "🎥 Vídeo";
-        else if (mediaType === "document") snippet = "📄 Documento"; // Se você tiver um tipo 'document' aqui
-        else snippet = "📎 Arquivo"; // Tipo genérico para outros
+        else if (mediaType === "document") snippet = "📄 Documento"; 
+        else snippet = "📎 Arquivo"; 
 
-        // NOVO: Atualizar a tabela Conversations com o tipo de mídia
-        if (contactOrGroup) { // Garantir que contactOrGroup foi enviado
+        // Atualizar a tabela Conversations com o tipo de mídia
+        if (contactOrGroup) { 
             await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType);
         } else {
             console.warn(`[Upload-Media] contactOrGroup não fornecido para atualização da conversa para childId: ${childId}.`);
         }
 
-        // NOVO: Salvar a mensagem individual na tabela de mensagens
+        // Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
             id: uuidv4(),
             messageId: uuidv4(),
-            conversationId: await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType), // Reusa a função para obter ID
+            conversationId: await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType), 
             childId: childId,
-            contactOrGroup: contactOrGroup,
-            messageText: data.Location, // Salva a URL da mídia como o 'messageText'
+            contactOrGroup: contactOrGroup, 
+            messageText: data.Location, 
             timestamp: timestamp,
-            direction: "sent", // Assumindo que o upload é sempre 'sent' do filho
+            direction: "sent", 
             messageType: mediaType,
-            phoneNumber: "unknown_number" // Ou extrair do body se disponível
+            phoneNumber: "unknown_number" 
         };
         await docClient.put(messageItem).promise();
         console.log(`[Upload-Media] Mensagem de mídia salva em ${TABLE_MESSAGES}.`);
@@ -315,7 +295,7 @@ app.post('/register-child', async (req, res) => {
             childToken: childToken || 'N/A',
             childImage: childImage || null,
             lastSeen: Date.now(),
-            isConnected: true // Define como conectado no registro
+            isConnected: true 
         }
     };
 
@@ -332,7 +312,6 @@ app.post('/register-child', async (req, res) => {
 // --- Rota para receber notificações (incluindo mensagens WhatsApp) ---
 app.post('/send-notification', async (req, res) => {
     console.log('[Notification] Recebendo notificação:', req.body);
-    // messageType já vem do cliente Android (WhatsAppAccessibilityService)
     const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body; 
 
     if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction) {
@@ -341,7 +320,6 @@ app.post('/send-notification', async (req, res) => {
     }
 
     try {
-        // Reutiliza a função auxiliar para atualizar/criar a conversa
         const conversationId = await updateConversation(childId, contactOrGroup, timestamp, message, messageType);
 
         // 2. Salvar a mensagem individual na tabela de mensagens
@@ -369,7 +347,6 @@ app.post('/send-notification', async (req, res) => {
 
     } catch (error) {
         console.error('[Notification] Erro ao processar notificação:', error);
-        // CORREÇÃO: Enviar um status de erro válido e a mensagem de erro
         res.status(500).send(`Erro interno do servidor ao processar notificação: ${error.message}`);
     }
 });
@@ -383,7 +360,7 @@ app.get('/get-registered-children', async (req, res) => {
         console.log(`[DynamoDB] Lista de filhos registrados solicitada da tabela '${TABLE_CHILDREN}'. Encontrados ${data.Items.length} filhos.`);
         const childrenWithStatus = data.Items.map(child => ({
             ...child,
-            connected: childToWebSocket.has(child.childId) // Verifica se está conectado via WebSocket
+            connected: childToWebSocket.has(child.childId) 
         }));
         res.status(200).json(childrenWithStatus);
     } catch (error) {
@@ -414,11 +391,10 @@ app.get('/conversations/:parentId', async (req, res) => {
                 ExpressionAttributeValues: { ':childId': childId }
             };
             const data = await docClient.query(getConversationsForChildParams).promise();
-            // Retornando o lastMessageType que foi salvo na tabela Conversations
             return data.Items.map(conv => ({
                 ...conv,
                 childName: childrenData.Items.find(c => c.childId === childId)?.childName || 'Desconhecido',
-                lastMessageType: conv.lastMessageType || 'text' // Garante que o tipo é retornado
+                lastMessageType: conv.lastMessageType || 'text' 
             }));
         });
 
@@ -620,7 +596,7 @@ wssGeneralCommands.on('connection', ws => {
                             const oldWs = childToWebSocket.get(ws.currentChildId);
                             console.log(`[WS-GENERAL-CONN] Removendo conexão filho antiga para ${ws.currentChildId} (Temp ID: ${oldWs ? oldWs.id : 'N/A'}).`);
                             oldWs.close(1000, 'Nova conexão estabelecida'); 
-                            childToWebSocket.delete(oldWs.id); // CORREÇÃO: Usar oldWs.id para deletar
+                            childToWebSocket.delete(oldWs.id); 
                             activeConnections.delete(oldWs.id); 
                         }
                         childToWebSocket.set(ws.currentChildId, ws);
@@ -634,7 +610,6 @@ wssGeneralCommands.on('connection', ws => {
                             ws.id = effectiveChildId; 
                         }
 
-                        // AGORA A FUNÇÃO updateChildConnectionStatus ESTÁ DEFINIDA!
                         await updateChildConnectionStatus(ws.currentChildId, true);
                         console.log(`[DynamoDB] Filho ${ws.currentChildName} (${ws.currentChildId}) status de conexão atualizado para 'true'.`);
                         console.log(`[WebSocket-Manager] Filho conectado e identificado: ID: ${ws.currentChildId}. Total de entradas ativas: ${activeConnections.size}. Filhos conectados (General WS): ${Array.from(childToWebSocket.keys()).join(', ')}`);
@@ -666,8 +641,8 @@ wssGeneralCommands.on('connection', ws => {
                     const locationParams = {
                         TableName: TABLE_LOCATIONS,
                         Item: {
-                            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela GPSintegracao
-                            locationId: uuidv4(), // Mantido, se for um campo adicional
+                            id: uuidv4(), 
+                            locationId: uuidv4(), 
                             childId: locChildId,
                             latitude: effectiveLatitude,
                             longitude: effectiveLongitude,
@@ -708,7 +683,7 @@ wssGeneralCommands.on('connection', ws => {
                     const messageParams = {
                         TableName: TABLE_MESSAGES,
                         Item: {
-                            id: uuidv4(), // ADICIONADO: Campo 'id' para a tabela Messages
+                            id: uuidv4(), 
                             messageId: uuidv4(), 
                             senderId: senderId,
                             receiverId: receiverIdFromPayload,
@@ -788,7 +763,7 @@ wssGeneralCommands.on('connection', ws => {
                     sendCommandWithRetry(targetChildIdStopAudio, { type: 'stopAudioStreamFromServer', parentId: parentIdForStopAudio }, activeAudioControlClients, 'AudioControl', 5, 500, 0); 
 
                     parentListeningToChild.delete(parentIdForStopAudio);
-                    console.log(`[WS-General] Pai ${parentIdForStopAudio} desconectado. Registro de escuta limpo.`);
+                    console.log(`[WS-GENERAL-CLOSE] Pai ${parentIdForStopAudio} desconectado. Registro de escuta limpo.`);
 
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
