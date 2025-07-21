@@ -159,7 +159,8 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
 
     const { childId, parentId, timestamp } = req.body;
     const audioBuffer = req.file.buffer;
-    const audioFileName = `audio/${childId}/${Date.now()}_${uuidv4()}.wav`;
+    // MODIFICADO: Nova estrutura de pasta no S3: WhatsappMedia/childId/audio/
+    const audioFileName = `WhatsappMedia/${childId}/audio/${Date.now()}_${uuidv4()}.wav`;
     const messageType = 'audio_stream'; // Usar um tipo diferente para diferenciar do WhatsApp
 
     console.log(`[Upload-Audio] Recebendo áudio para childId: ${childId}, parentId: ${parentId}, tamanho: ${audioBuffer.length} bytes`);
@@ -172,7 +173,7 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     };
 
     try {
-        const data = await s3.upload(uploadParams).promise();
+        await s3.upload(uploadParams).promise();
         console.log(`[Upload-Audio] Áudio enviado com sucesso para S3: ${data.Location}`);
 
         // Enviar URL do S3 de volta para o cliente pai via WebSocket (se houver um pai escutando)
@@ -208,7 +209,8 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     const mediaBuffer = req.file.buffer;
     const originalname = req.file.originalname;
     const fileExtension = originalname.split('.').pop();
-    const mediaFileName = `${mediaType}/${childId}/${Date.now()}_${uuidv4()}.${fileExtension}`;
+    // MODIFICADO: Nova estrutura de pasta no S3: WhatsappMedia/childId/mediaType/
+    const mediaFileName = `WhatsappMedia/${childId}/${mediaType}/${Date.now()}_${uuidv4()}.${fileExtension}`;
     const contentType = req.file.mimetype;
 
     console.log(`[Upload-Media] Recebendo ${mediaType} para childId: ${childId}, parentId: ${parentId}, tamanho: ${mediaBuffer.length} bytes, tipo: ${contentType}`);
@@ -486,8 +488,7 @@ app.use((err, req, res, next) => {
 
 // --- LÓGICA DE WEBSOCKETS ---
 
-// Função auxiliar para enviar comandos com retentativa
-function sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog, maxRetries = 3, initialDelay = 1000, currentRetry = 0) {
+const sendCommandWithRetry = (childId, commandMessage, targetMap, mapNameForLog, maxRetries = 3, initialDelay = 1000, currentRetry = 0) => {
     const targetWs = targetMap.get(childId);
 
     console.log(`[Command-Retry-DEBUG] Tentativa ${currentRetry + 1}: Buscando childId=${childId} no mapa ${mapNameForLog}. Mapa contém: ${Array.from(targetMap.keys()).join(', ')}`);
