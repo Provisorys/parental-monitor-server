@@ -159,7 +159,7 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
 
     const { childId, parentId, timestamp } = req.body;
     const audioBuffer = req.file.buffer;
-    // MODIFICADO: Nova estrutura de pasta no S3: WhatsappMedia/childId/audio/
+    // Nova estrutura de pasta no S3: WhatsappMedia/childId/audio/
     const audioFileName = `WhatsappMedia/${childId}/audio/${Date.now()}_${uuidv4()}.wav`;
     const messageType = 'audio_stream'; // Usar um tipo diferente para diferenciar do WhatsApp
 
@@ -169,11 +169,11 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
         Bucket: process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory',
         Key: audioFileName,
         Body: audioBuffer,
-        ContentType: 'audio/wav'
+        ContentType: 'audio/wav' // Manter como WAV para streaming, se o cliente estiver enviando WAV
     };
 
     try {
-        await s3.upload(uploadParams).promise();
+        const data = await s3.upload(uploadParams).promise();
         console.log(`[Upload-Audio] Áudio enviado com sucesso para S3: ${data.Location}`);
 
         // Enviar URL do S3 de volta para o cliente pai via WebSocket (se houver um pai escutando)
@@ -199,7 +199,7 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     }
 });
 
-// Rota de upload de mídia geral (imagens, vídeos)
+// Rota de upload de mídia geral (imagens, vídeos, áudios do WhatsApp)
 app.post('/upload-media', upload.single('media'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de mídia enviado.');
@@ -209,11 +209,22 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     const mediaBuffer = req.file.buffer;
     const originalname = req.file.originalname;
     const fileExtension = originalname.split('.').pop();
-    // MODIFICADO: Nova estrutura de pasta no S3: WhatsappMedia/childId/mediaType/
-    const mediaFileName = `WhatsappMedia/${childId}/${mediaType}/${Date.now()}_${uuidv4()}.${fileExtension}`;
-    const contentType = req.file.mimetype;
 
-    console.log(`[Upload-Media] Recebendo ${mediaType} para childId: ${childId}, parentId: ${parentId}, tamanho: ${mediaBuffer.length} bytes, tipo: ${contentType}`);
+    // Determinar ContentType mais específico para S3
+    let contentType = req.file.mimetype;
+    if (mediaType === "audio" && (fileExtension === "opus" || fileExtension === "ogg")) {
+        contentType = "audio/ogg"; // WhatsApp voice notes are typically audio/ogg (Opus codec)
+    } else if (mediaType === "audio" && fileExtension === "mp3") {
+        contentType = "audio/mpeg";
+    } else if (mediaType === "audio" && fileExtension === "wav") {
+        contentType = "audio/wav";
+    }
+
+
+    // Nova estrutura de pasta no S3: WhatsappMedia/childId/mediaType/
+    const mediaFileName = `WhatsappMedia/${childId}/${mediaType}/${Date.now()}_${uuidv4()}.${fileExtension}`;
+
+    console.log(`[Upload-Media] Recebendo ${mediaType} para childId: ${childId}, parentId: ${parentId}, tamanho: ${mediaBuffer.length} bytes, tipo: ${contentType}, extensão: ${fileExtension}`);
 
     const uploadParams = {
         Bucket: process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory',
@@ -229,6 +240,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         let snippet = "";
         if (mediaType === "image") snippet = "📷 Imagem";
         else if (mediaType === "video") snippet = "🎥 Vídeo";
+        else if (mediaType === "audio") snippet = "🎵 Áudio"; // Snippet para áudio
         else if (mediaType === "document") snippet = "📄 Documento";
         else snippet = "📎 Arquivo";
 
@@ -242,7 +254,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
             conversationId = uuidv4(); // Gera um UUID para a mensagem sem associar a uma conversa específica
         }
 
-        // 2. Salvar a mensagem individual na tabela de mensagens
+        // 2. Salvar a mensagem individual na tabela de mensagens (CORREÇÃO AQUI!)
         const messageItem = {
             id: uuidv4(), // ID único para o item da mensagem
             messageId: uuidv4(), // Outro ID único para a mensagem (pode ser o mesmo que 'id')
@@ -251,15 +263,20 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
             contactOrGroup: contactOrGroup || 'N/A', // Garante que não seja undefined
             messageText: data.Location, // A URL do S3 é o "conteúdo" da mensagem de mídia
             timestamp: timestamp,
-            direction: "sent",
+            direction: "sent", // Mídia enviada do filho
             messageType: mediaType,
-            phoneNumber: "unknown_number"
+            phoneNumber: "unknown_number" // Ou extrair do contato se possível
         };
-        await docClient.put(messageItem).promise();
-        console.log(`[Upload-Media] Mensagem de mídia salva em ${TABLE_MESSAGES}.`);
+
+        const putMessageParams = {
+            TableName: TABLE_MESSAGES,
+            Item: messageItem
+        };
+        await docClient.put(putMessageParams).promise();
+        console.log(`[Upload-Media] Mensagem de mídia salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId} com tipo ${mediaType}, direção sent`);
 
 
-        // Opcional: Notificar o pai sobre a nova mídia
+        // Opcional: Notificar o pai sobre a nova mídia via WebSocket
         const parentWs = parentToWebSocket.get(parentId);
         if (parentWs && parentWs.readyState === WebSocket.OPEN) {
             const message = JSON.stringify({
@@ -267,7 +284,8 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
                 childId: childId,
                 mediaType: mediaType,
                 url: data.Location,
-                timestamp: timestamp
+                timestamp: timestamp,
+                contactOrGroup: contactOrGroup // Incluir contactOrGroup para o pai
             });
             parentWs.send(message);
             console.log(`[Upload-Media] URL da mídia (${data.Location}) enviada para o pai ${parentId}.`);
@@ -275,7 +293,7 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
 
         res.status(200).json({ message: 'Mídia recebida e enviada para S3.', url: data.Location, childId: childId, mediaType: mediaType });
     } catch (error) {
-        console.error('[Upload-Media] Erro ao enviar mídia para S3:', error);
+        console.error('[Upload-Media] Erro ao enviar mídia para S3 ou salvar no DynamoDB:', error);
         res.status(500).send('Erro ao processar a mídia.');
     }
 });
