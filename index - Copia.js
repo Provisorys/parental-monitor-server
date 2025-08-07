@@ -302,7 +302,6 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
             parentWs.send(message);
             console.log(`[Upload-Media] URL da mídia (${data.Location}) enviada para o pai ${parentId}.`);
         }
-
         res.status(200).json({ message: 'Mídia recebida e enviada para S3.', url: data.Location, childId: childId, mediaType: mediaType });
     } catch (error) {
         console.error('[Upload-Media] Erro ao enviar mídia para S3 ou salvar no DynamoDB:', error);
@@ -452,28 +451,26 @@ app.get('/conversations/:parentId', async (req, res) => {
 });
 
 
-// CORREÇÃO CRÍTICA AQUI: Usando docClient.query() em vez de docClient.scan()
-app.get('/messages/:childId/:contactOrGroup', async (req, res) => {
-    const { childId, contactOrGroup } = req.params;
-    console.log(`[Messages] Recebendo requisição para listar mensagens do filho: ${childId}, conversa: ${contactOrGroup}`);
+// *** MUDANÇA CRÍTICA AQUI: Endpoint para listar mensagens por Conversation ID ***
+app.get('/messages/:childId/:conversationId', async (req, res) => {
+    const { childId, conversationId } = req.params; // <-- Agora espera conversationId na URL
+    console.log(`[Messages] Recebendo requisição para listar mensagens do filho: ${childId}, conversa ID: ${conversationId}`);
 
     const params = {
         TableName: TABLE_MESSAGES,
         // Usamos KeyConditionExpression para a Partition Key (childId)
         KeyConditionExpression: 'childId = :childId',
-        // Usamos FilterExpression para o atributo contactOrGroup, pois ele não é a Sort Key
-        // ATENÇÃO: FilterExpression é aplicada APÓS a query e pode ser menos eficiente para muitos resultados
-        // Se a performance for um problema, considere um GSI (Global Secondary Index) com contactOrGroup como PK e timestamp como SK.
-        FilterExpression: 'contactOrGroup = :contactOrGroup',
+        // AQUI ESTÁ A CORREÇÃO: Filtra por conversationId
+        FilterExpression: 'conversationId = :conversationId',
         ExpressionAttributeValues: {
             ':childId': childId,
-            ':contactOrGroup': contactOrGroup
+            ':conversationId': conversationId // <-- Usa conversationId no filtro
         },
         ScanIndexForward: true // Ordenar as mensagens do mais antigo para o mais novo pelo timestamp (Sort Key)
     };
     try {
-        const data = await docClient.query(params).promise(); // CORRIGIDO PARA query()
-        console.log(`[Messages] ${data.Items.length} mensagens encontradas para a conversa ${contactOrGroup} do filho ${childId}.`);
+        const data = await docClient.query(params).promise();
+        console.log(`[Messages] ${data.Items.length} mensagens encontradas para a conversa ID ${conversationId} do filho ${childId}.`);
         res.status(200).json(data.Items);
     } catch (error) {
         console.error('[Messages] Erro ao obter mensagens:', error);
@@ -1013,7 +1010,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`Endpoint de registro de filho: http://localhost:${PORT}/register-child`);
     console.log(`Endpoint de notificação (WhatsApp): http://localhost:${PORT}/send-notification`);
     console.log(`Endpoint para listar conversas (do pai): http://localhost:${PORT}/conversations/:parentId`);
-    console.log(`Endpoint para listar mensagens (da conversa): http://localhost:${PORT}/messages/:childId/:contactOrGroup`);
+    console.log(`Endpoint para listar mensagens (da conversa): http://localhost:${PORT}/messages/:childId/:conversationId`); // Atualizado aqui
     console.log(`WebSocket de comandos gerais em: ws://localhost:${PORT}/ws-general-commands`);
     console.log(`WebSocket de controle de áudio em: ws://localhost:${PORT}/ws-audio-control`);
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);

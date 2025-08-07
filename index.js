@@ -1,4 +1,3 @@
-// Importações necessárias
 const express = require('express');
 const multer = require('multer');
 const bodyParser = require('body-parser');
@@ -14,21 +13,16 @@ const wsConnections = new Map();
 const childToWebSocket = new Map();
 const parentToWebSocket = new Map();
 const activeAudioControlClients = new Map();
-
 const activeConnections = new Map();
-
 const pendingAudioRequests = new Map();
-
-// --- NOVO MAPA PARA RASTREAR QUAL FILHO O PAI ESTÁ OUVINDO/ASSISTINDO ---
 const parentListeningToChild = new Map(); // Key: parentId, Value: childId que o pai está ouvindo/assistindo
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Configuração do Multer:
-// Aumentar o limite de tamanho do Multer para lidar com arquivos de áudio/vídeo potencialmente maiores
+// Configuração do Multer
 const upload = multer({
-    limits: { fileSize: 50 * 1024 * 1024 } // Limite de 50 MB para uploads gerais (ajuste conforme necessário)
+    limits: { fileSize: 50 * 1024 * 1024 } // Limite de 50 MB
 });
 const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -43,23 +37,23 @@ AWS.config.update({
 const docClient = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
 
-// Nomes das tabelas DynamoDB (MANTENDO OS NOMES EXISTENTES E ADICIONANDO 'Conversations')
+// Nomes das tabelas DynamoDB
 const TABLE_CHILDREN = 'Children';
 const TABLE_LOCATIONS = 'GPSintegracao';
-const TABLE_MESSAGES = 'Messages'; // Tabela para mensagens detalhadas
-const TABLE_CALLS = process.env.DYNAMODB_TABLE_CALLS || 'parental-monitor-calls'; // Mantido padrão, ajuste se tiver um nome específico
-const TABLE_NOTIFICATIONS = process.env.DYNAMODB_TABLE_NOTIFICATIONS || 'parental-monitor-notifications'; // Mantido padrão, ajuste se tiver um nome específico
-const TABLE_CONVERSATIONS = 'Conversations'; // A nova tabela
+const TABLE_MESSAGES = 'Messages';
+const TABLE_CALLS = process.env.DYNAMODB_TABLE_CALLS || 'parental-monitor-calls';
+const TABLE_NOTIFICATIONS = process.env.DYNAMODB_TABLE_NOTIFICATIONS || 'parental-monitor-notifications';
+const TABLE_CONVERSATIONS = 'Conversations';
 
 // Middlewares
 app.use(cors());
-app.use(bodyParser.json()); // Para JSON no corpo da requisição
-app.use(bodyParser.urlencoded({ extended: true })); // Para dados de formulário URL-encoded
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // Cria o servidor HTTP
 const server = http.createServer(app);
 
-// Cria o servidor WebSocket anexado ao servidor HTTP
+// Cria os servidores WebSocket
 const wssGeneralCommands = new WebSocket.Server({ noServer: true });
 const wssAudioControl = new WebSocket.Server({ noServer: true });
 
@@ -99,53 +93,61 @@ async function updateChildConnectionStatus(childId, isConnected) {
     }
 }
 
-// --- FUNÇÃO AUXILIAR PARA ATUALIZAR CONVERSA (REUTILIZÁVEL) ---
-// Retorna o conversationId (UUID) para ser usado na mensagem individual
+// --- FUNÇÃO AUXILIAR PARA ATUALIZAR CONVERSA ---
 async function updateConversation(childId, contactOrGroup, timestamp, messageSnippet, messageType, messageDirection) {
     let conversationId;
+    const sanitizedContactOrGroup = contactOrGroup || 'Desconhecido';
+    const sanitizedMessageType = messageType || 'text';
+    const sanitizedMessageDirection = messageDirection || 'unknown';
+    const truncatedSnippet = messageSnippet ? messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : '') : 'Mensagem vazia';
+
     const getConversationParams = {
         TableName: TABLE_CONVERSATIONS,
         Key: {
             childId: childId,
-            contactOrGroup: contactOrGroup
+            contactOrGroup: sanitizedContactOrGroup
         }
     };
-    const existingConversationData = await docClient.get(getConversationParams).promise();
-
-    if (existingConversationData.Item) {
-        conversationId = existingConversationData.Item.conversationId; // Reutiliza o UUID existente
-        const updateConversationParams = {
-            TableName: TABLE_CONVERSATIONS,
-            Key: { childId: childId, contactOrGroup: contactOrGroup },
-            UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet, lastMessageType = :msgType, lastMessageDirection = :msgDirection',
-            ExpressionAttributeValues: {
-                ':ts': timestamp,
-                ':snippet': messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : ''),
-                ':msgType': messageType,
-                ':msgDirection': messageDirection
-            }
-        };
-        await docClient.update(updateConversationParams).promise();
-        console.log(`[Conversations] Conversa atualizada: ${contactOrGroup} para childId: ${childId} com tipo ${messageType}, direção ${messageDirection}`);
-    } else {
-        conversationId = uuidv4(); // Gera um novo UUID para a conversa
-        const newConversationParams = {
-            TableName: TABLE_CONVERSATIONS,
-            Item: {
-                conversationId: conversationId, // Salva o UUID gerado
-                childId: childId,
-                contactOrGroup: contactOrGroup,
-                lastMessageTimestamp: timestamp,
-                lastMessageSnippet: messageSnippet.substring(0, 100) + (messageSnippet.length > 100 ? '...' : ''),
-                lastMessageType: messageType,
-                lastMessageDirection: messageDirection,
-                createdAt: Date.now()
-            }
-        };
-        await docClient.put(newConversationParams).promise();
-        console.log(`[Conversations] Nova conversa criada: ${contactOrGroup} para childId: ${childId} com tipo ${messageType}, direção ${messageDirection}. UUID: ${conversationId}`);
+    try {
+        const existingConversationData = await docClient.get(getConversationParams).promise();
+        if (existingConversationData.Item) {
+            conversationId = existingConversationData.Item.conversationId;
+            const updateConversationParams = {
+                TableName: TABLE_CONVERSATIONS,
+                Key: { childId: childId, contactOrGroup: sanitizedContactOrGroup },
+                UpdateExpression: 'SET lastMessageTimestamp = :ts, lastMessageSnippet = :snippet, lastMessageType = :msgType, lastMessageDirection = :msgDirection',
+                ExpressionAttributeValues: {
+                    ':ts': parseInt(timestamp),
+                    ':snippet': truncatedSnippet,
+                    ':msgType': sanitizedMessageType,
+                    ':msgDirection': sanitizedMessageDirection
+                }
+            };
+            await docClient.update(updateConversationParams).promise();
+            console.log(`[Conversations] Conversa atualizada: ${sanitizedContactOrGroup} para childId: ${childId}, conversationId: ${conversationId}, tipo: ${sanitizedMessageType}, direção: ${sanitizedMessageDirection}`);
+        } else {
+            conversationId = uuidv4();
+            const newConversationParams = {
+                TableName: TABLE_CONVERSATIONS,
+                Item: {
+                    conversationId: conversationId,
+                    childId: childId,
+                    contactOrGroup: sanitizedContactOrGroup,
+                    lastMessageTimestamp: parseInt(timestamp),
+                    lastMessageSnippet: truncatedSnippet,
+                    lastMessageType: sanitizedMessageType,
+                    lastMessageDirection: sanitizedMessageDirection,
+                    createdAt: Date.now()
+                }
+            };
+            await docClient.put(newConversationParams).promise();
+            console.log(`[Conversations] Nova conversa criada: ${sanitizedContactOrGroup} para childId: ${childId}, conversationId: ${conversationId}, tipo: ${sanitizedMessageType}, direção: ${sanitizedMessageDirection}`);
+        }
+        return conversationId;
+    } catch (error) {
+        console.error(`[Conversations] Erro ao atualizar/criar conversa para childId: ${childId}, contactOrGroup: ${sanitizedContactOrGroup}:`, error);
+        throw error;
     }
-    return conversationId; // Retorna o UUID da conversa
 }
 
 // --- FUNÇÃO AUXILIAR PARA SANITIZAR NOMES PARA CHAVES S3 ---
@@ -153,25 +155,22 @@ function sanitizeS3KeyPart(inputString) {
     if (!inputString) {
         return "unknown_contact";
     }
-    // Remove caracteres especiais e espaços, substituindo por underscores
-    // Mantém letras, números, hífen e sublinhado
     return inputString.replace(/[^a-zA-Z0-9-_.]/g, '_').toLowerCase();
 }
 
-
 // --- Rotas HTTP ---
 
-// Rota de upload de áudio (APENAS PARA STREAMING - SEM REGISTRO NO DYNAMODB)
+// Rota de upload de áudio
 app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     if (!req.file) {
+        console.error('[Upload-Audio] Nenhum arquivo de áudio enviado.');
         return res.status(400).send('Nenhum arquivo de áudio enviado.');
     }
 
     const { childId, parentId, timestamp } = req.body;
     const audioBuffer = req.file.buffer;
-    // Nova estrutura de pasta no S3: WhatsappMedia/childId/audio/
     const audioFileName = `WhatsappMedia/${childId}/audio/${Date.now()}_${uuidv4()}.wav`;
-    const messageType = 'audio_stream'; // Usar um tipo diferente para diferenciar do WhatsApp
+    const messageType = 'audio_stream';
 
     console.log(`[Upload-Audio] Recebendo áudio para childId: ${childId}, parentId: ${parentId}, tamanho: ${audioBuffer.length} bytes`);
 
@@ -179,14 +178,13 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
         Bucket: process.env.S3_BUCKET_NAME || 'parental-monitor-midias-provisory',
         Key: audioFileName,
         Body: audioBuffer,
-        ContentType: 'audio/wav' // Manter como WAV para streaming, se o cliente estiver enviando WAV
+        ContentType: 'audio/wav'
     };
 
     try {
         const data = await s3.upload(uploadParams).promise();
         console.log(`[Upload-Audio] Áudio enviado com sucesso para S3: ${data.Location}`);
 
-        // Enviar URL do S3 de volta para o cliente pai via WebSocket (se houver um pai escutando)
         const parentWs = parentToWebSocket.get(parentId);
         if (parentWs && parentWs.readyState === WebSocket.OPEN) {
             const message = JSON.stringify({
@@ -199,7 +197,7 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
             parentWs.send(message);
             console.log(`[Upload-Audio] URL do áudio (${data.Location}) enviada para o pai ${parentId}.`);
         } else {
-            console.warn(`[Upload-Audio] Pai ${parentId} não conectado ou WebSocket não está aberto. Não foi possível enviar a URL do áudio.`);
+            console.warn(`[Upload-Audio] Pai ${parentId} não conectado ou WebSocket não está aberto.`);
         }
 
         res.status(200).json({ message: 'Áudio recebido e enviado para S3.', url: data.Location, childId: childId, messageType: messageType });
@@ -209,9 +207,10 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
     }
 });
 
-// Rota de upload de mídia geral (imagens, vídeos, áudios do WhatsApp)
+// Rota de upload de mídia geral
 app.post('/upload-media', upload.single('media'), async (req, res) => {
     if (!req.file) {
+        console.error('[Upload-Media] Nenhum arquivo de mídia enviado.');
         return res.status(400).send('Nenhum arquivo de mídia enviado.');
     }
 
@@ -220,20 +219,16 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
     const originalname = req.file.originalname;
     const fileExtension = originalname.split('.').pop();
 
-    // Determinar ContentType mais específico para S3
     let contentType = req.file.mimetype;
     if (mediaType === "audio" && (fileExtension === "opus" || fileExtension === "ogg")) {
-        contentType = "audio/ogg"; // WhatsApp voice notes are typically audio/ogg (Opus codec)
+        contentType = "audio/ogg";
     } else if (mediaType === "audio" && fileExtension === "mp3") {
         contentType = "audio/mpeg";
     } else if (mediaType === "audio" && fileExtension === "wav") {
         contentType = "audio/wav";
     }
 
-    // Sanitizar o nome do contato/grupo para uso como parte do caminho S3
     const sanitizedContactOrGroup = sanitizeS3KeyPart(contactOrGroup);
-
-    // MODIFICADO: Nova estrutura de pasta no S3: WhatsappMedia/childId/sanitizedContactOrGroup/mediaType/
     const mediaFileName = `WhatsappMedia/${childId}/${sanitizedContactOrGroup}/${mediaType}/${Date.now()}_${uuidv4()}.${fileExtension}`;
 
     console.log(`[Upload-Media] Recebendo ${mediaType} para childId: ${childId}, parentId: ${parentId}, tamanho: ${mediaBuffer.length} bytes, tipo: ${contentType}, extensão: ${fileExtension}, caminho S3: ${mediaFileName}`);
@@ -252,32 +247,29 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
         let snippet = "";
         if (mediaType === "image") snippet = "📷 Imagem";
         else if (mediaType === "video") snippet = "🎥 Vídeo";
-        else if (mediaType === "audio") snippet = "🎵 Áudio"; // Snippet para áudio
+        else if (mediaType === "audio") snippet = "🎵 Áudio";
         else if (mediaType === "document") snippet = "📄 Documento";
         else snippet = "📎 Arquivo";
 
-        // 1. Atualizar a tabela Conversations e obter o conversationId
         let conversationId;
         if (contactOrGroup) {
             conversationId = await updateConversation(childId, contactOrGroup, timestamp, snippet, mediaType, "sent");
         } else {
-            console.warn(`[Upload-Media] contactOrGroup não fornecido para atualização da conversa para childId: ${childId}.`);
-            // Se contactOrGroup não for fornecido, ainda podemos gerar um ID para a mensagem
-            conversationId = uuidv4(); // Gera um UUID para a mensagem sem associar a uma conversa específica
+            console.warn(`[Upload-Media] contactOrGroup não fornecido. Usando UUID avulso para mensagem.`);
+            conversationId = uuidv4();
         }
 
-        // 2. Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
-            id: uuidv4(), // ID único para o item da mensagem
-            messageId: uuidv4(), // Outro ID único para a mensagem (pode ser o mesmo que 'id')
-            conversationId: conversationId, // Usa o conversationId obtido da função
+            id: uuidv4(),
+            messageId: uuidv4(),
+            conversationId: conversationId,
             childId: childId,
-            contactOrGroup: contactOrGroup || 'N/A', // Garante que não seja undefined
-            messageText: data.Location, // A URL do S3 é o "conteúdo" da mensagem de mídia
-            timestamp: timestamp,
-            direction: "sent", // Mídia enviada do filho
+            contactOrGroup: contactOrGroup || 'N/A',
+            messageText: data.Location,
+            timestamp: parseInt(timestamp),
+            direction: "sent",
             messageType: mediaType,
-            phoneNumber: "unknown_number" // Ou extrair do contato se possível
+            phoneNumber: "unknown_number"
         };
 
         const putMessageParams = {
@@ -285,10 +277,8 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
             Item: messageItem
         };
         await docClient.put(putMessageParams).promise();
-        console.log(`[Upload-Media] Mensagem de mídia salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId} com tipo ${mediaType}, direção sent`);
+        console.log(`[Upload-Media] Mensagem de mídia salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId}`);
 
-
-        // Opcional: Notificar o pai sobre a nova mídia via WebSocket
         const parentWs = parentToWebSocket.get(parentId);
         if (parentWs && parentWs.readyState === WebSocket.OPEN) {
             const message = JSON.stringify({
@@ -297,11 +287,12 @@ app.post('/upload-media', upload.single('media'), async (req, res) => {
                 mediaType: mediaType,
                 url: data.Location,
                 timestamp: timestamp,
-                contactOrGroup: contactOrGroup // Incluir contactOrGroup para o pai
+                contactOrGroup: contactOrGroup
             });
             parentWs.send(message);
             console.log(`[Upload-Media] URL da mídia (${data.Location}) enviada para o pai ${parentId}.`);
         }
+
         res.status(200).json({ message: 'Mídia recebida e enviada para S3.', url: data.Location, childId: childId, mediaType: mediaType });
     } catch (error) {
         console.error('[Upload-Media] Erro ao enviar mídia para S3 ou salvar no DynamoDB:', error);
@@ -315,6 +306,7 @@ app.post('/register-child', async (req, res) => {
     console.log(`[Register] Tentativa de registro: childId=${childId}, parentId=${parentId}, childName=${childName}`);
 
     if (!childId || !parentId || !childName) {
+        console.error('[Register] Dados incompletos para registro.');
         return res.status(400).send('childId, parentId e childName são obrigatórios.');
     }
 
@@ -341,29 +333,29 @@ app.post('/register-child', async (req, res) => {
     }
 });
 
-// --- Rota para receber notificações (incluindo mensagens WhatsApp) ---
+// Rota para receber notificações (incluindo mensagens WhatsApp)
 app.post('/send-notification', async (req, res) => {
     console.log('[Notification] Recebendo notificação:', req.body);
-    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction } = req.body;
+    const { childId, message, messageType, timestamp, contactOrGroup, phoneNumber, direction, parentId } = req.body;
 
-    if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction) {
+    if (!childId || !message || !messageType || !timestamp || !contactOrGroup || !direction || !parentId) {
         console.error('[Notification] Dados de notificação incompletos:', req.body);
-        return res.status(400).send('Dados de notificação incompletos. Campos obrigatórios: childId, message, messageType, timestamp, contactOrGroup, direction.');
+        return res.status(400).send('Dados de notificação incompletos. Campos obrigatórios: childId, message, messageType, timestamp, contactOrGroup, direction, parentId.');
     }
 
     try {
-        // 1. Atualizar a tabela Conversations e obter o conversationId
+        // Atualizar a tabela Conversations e obter o conversationId
         const conversationId = await updateConversation(childId, contactOrGroup, timestamp, message, messageType, direction);
 
-        // 2. Salvar a mensagem individual na tabela de mensagens
+        // Salvar a mensagem individual na tabela de mensagens
         const messageItem = {
-            id: uuidv4(), // ID único para o item da mensagem
-            messageId: uuidv4(), // Outro ID único para a mensagem (pode ser o mesmo que 'id')
-            conversationId: conversationId, // Usa o conversationId obtido da função
+            id: uuidv4(),
+            messageId: uuidv4(),
+            conversationId: conversationId,
             childId: childId,
             contactOrGroup: contactOrGroup,
             messageText: message,
-            timestamp: timestamp,
+            timestamp: parseInt(timestamp),
             direction: direction,
             messageType: messageType,
             phoneNumber: phoneNumber || 'unknown_number'
@@ -374,18 +366,35 @@ app.post('/send-notification', async (req, res) => {
             Item: messageItem
         };
         await docClient.put(putMessageParams).promise();
-        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId} com tipo ${messageType}, direção ${direction}`);
+        console.log(`[Notification] Mensagem salva em ${TABLE_MESSAGES}: ${messageItem.messageId} para conversa: ${conversationId}, tipo: ${messageType}, direção: ${direction}`);
+
+        // Notificar o pai via WebSocket, se conectado
+        const parentWs = parentToWebSocket.get(parentId);
+        if (parentWs && parentWs.readyState === WebSocket.OPEN) {
+            const wsMessage = JSON.stringify({
+                type: 'chatMessage',
+                childId: childId,
+                message: message,
+                messageType: messageType,
+                timestamp: timestamp,
+                contactOrGroup: contactOrGroup,
+                direction: direction,
+                phoneNumber: phoneNumber || 'unknown_number'
+            });
+            parentWs.send(wsMessage);
+            console.log(`[Notification] Mensagem enviada para o pai ${parentId} via WebSocket: ${wsMessage}`);
+        } else {
+            console.warn(`[Notification] Pai ${parentId} não conectado ou WebSocket não está aberto.`);
+        }
 
         res.status(200).send('Notificação recebida e processada.');
-
     } catch (error) {
         console.error('[Notification] Erro ao processar notificação:', error);
         res.status(500).send(`Erro interno do servidor ao processar notificação: ${error.message}`);
     }
 });
 
-
-// Rotas para buscar dados (com nomes de tabela corrigidos)
+// Rota para listar filhos registrados
 app.get('/get-registered-children', async (req, res) => {
     try {
         const params = { TableName: TABLE_CHILDREN };
@@ -397,22 +406,21 @@ app.get('/get-registered-children', async (req, res) => {
         }));
         res.status(200).json(childrenWithStatus);
     } catch (error) {
-        console.error('Erro ao buscar filhos no DynamoDB:', error);
+        console.error('[DynamoDB] Erro ao buscar filhos:', error);
         res.status(500).send('Erro interno do servidor ao buscar filhos.');
     }
 });
 
-// NOVO ENDPOINT: Listar conversas de um pai (obtendo conversas de todos os seus filhos)
+// Rota para listar conversas de um pai
 app.get('/conversations/:parentId', async (req, res) => {
     const { parentId } = req.params;
     try {
-        // 1. Obter todos os filhos associados a este parentId
         const getChildrenParams = {
             TableName: TABLE_CHILDREN,
             FilterExpression: 'parentId = :parentId',
             ExpressionAttributeValues: { ':parentId': parentId }
         };
-        const childrenData = await docClient.scan(getChildrenParams).promise(); // Usar scan aqui é ok se o número de filhos for pequeno
+        const childrenData = await docClient.scan(getChildrenParams).promise();
         const childIds = childrenData.Items.map(child => child.childId);
 
         if (childIds.length === 0) {
@@ -420,7 +428,6 @@ app.get('/conversations/:parentId', async (req, res) => {
             return res.status(200).json([]);
         }
 
-        // 2. Para cada filho, buscar suas conversas na tabela CONVERSATIONS
         const conversationsPromises = childIds.map(async (child) => {
             const getConversationsForChildParams = {
                 TableName: TABLE_CONVERSATIONS,
@@ -428,7 +435,6 @@ app.get('/conversations/:parentId', async (req, res) => {
                 ExpressionAttributeValues: { ':childId': child }
             };
             const data = await docClient.query(getConversationsForChildParams).promise();
-            // Adiciona o nome do filho e padroniza os campos de tipo/direção
             return data.Items.map(conv => ({
                 ...conv,
                 childName: childrenData.Items.find(c => c.childId === child)?.childName || 'Desconhecido',
@@ -438,47 +444,45 @@ app.get('/conversations/:parentId', async (req, res) => {
         });
 
         const allConversations = (await Promise.all(conversationsPromises)).flat();
-        // Opcional: Ordenar todas as conversas pelo timestamp da última mensagem (mais recente primeiro)
         allConversations.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
-
         console.log(`[Conversations] ${allConversations.length} conversas encontradas para o pai ${parentId}.`);
         res.status(200).json(allConversations);
-
     } catch (error) {
         console.error('[Conversations] Erro ao obter conversas:', error);
         res.status(500).send('Erro ao obter conversas.');
     }
 });
 
-
-// *** MUDANÇA CRÍTICA AQUI: Endpoint para listar mensagens por Conversation ID ***
+// Rota para listar mensagens por conversationId
 app.get('/messages/:childId/:conversationId', async (req, res) => {
-    const { childId, conversationId } = req.params; // <-- Agora espera conversationId na URL
-    console.log(`[Messages] Recebendo requisição para listar mensagens do filho: ${childId}, conversa ID: ${conversationId}`);
+    const { childId, conversationId } = req.params;
+    const limit = parseInt(req.query.limit) || 100; // Limite padrão de 100 mensagens
+    console.log(`[Messages] Recebendo requisição para listar mensagens do filho: ${childId}, conversa ID: ${conversationId}, limite: ${limit}`);
 
     const params = {
         TableName: TABLE_MESSAGES,
-        // Usamos KeyConditionExpression para a Partition Key (childId)
         KeyConditionExpression: 'childId = :childId',
-        // AQUI ESTÁ A CORREÇÃO: Filtra por conversationId
         FilterExpression: 'conversationId = :conversationId',
         ExpressionAttributeValues: {
             ':childId': childId,
-            ':conversationId': conversationId // <-- Usa conversationId no filtro
+            ':conversationId': conversationId
         },
-        ScanIndexForward: true // Ordenar as mensagens do mais antigo para o mais novo pelo timestamp (Sort Key)
+        ScanIndexForward: true,
+        Limit: limit
     };
     try {
         const data = await docClient.query(params).promise();
         console.log(`[Messages] ${data.Items.length} mensagens encontradas para a conversa ID ${conversationId} do filho ${childId}.`);
-        res.status(200).json(data.Items);
+        // Ordenar mensagens por timestamp (crescente)
+        const sortedMessages = data.Items.sort((a, b) => a.timestamp - b.timestamp);
+        res.status(200).json(sortedMessages);
     } catch (error) {
         console.error('[Messages] Erro ao obter mensagens:', error);
         res.status(500).send('Erro ao obter mensagens.');
     }
 });
 
-
+// Rota para localizações
 app.get('/locations/:childId', async (req, res) => {
     const { childId } = req.params;
     const params = {
@@ -490,35 +494,36 @@ app.get('/locations/:childId', async (req, res) => {
     };
     try {
         const data = await docClient.query(params).promise();
+        console.log(`[Locations] ${data.Items.length} localizações encontradas para o filho ${childId}.`);
         res.status(200).json(data.Items);
     } catch (error) {
-        console.error('Erro ao obter localizações:', error);
+        console.error('[Locations] Erro ao obter localizações:', error);
         res.status(500).send('Erro ao obter localizações.');
     }
 });
 
+// Rota para Twilio token (placeholder)
 app.get('/twilio-token', (req, res) => {
-    console.log("Requisição para Twilio token recebida. Retornando placeholder.");
+    console.log('[Twilio] Requisição para Twilio token recebida. Retornando placeholder.');
     res.status(200).json({ token: 'seu_token_do_twilio_aqui' });
 });
 
+// Middleware para rotas não encontradas
 app.use((req, res, next) => {
     console.warn(`[HTTP] Rota não encontrada: ${req.method} ${req.originalUrl}`);
     res.status(404).send('Rota não encontrada.');
 });
 
+// Middleware para erros
 app.use((err, req, res, next) => {
-    console.error('Erro interno do servidor:', err);
+    console.error('[HTTP] Erro interno do servidor:', err);
     res.status(500).send('Erro interno do servidor.');
 });
 
-
 // --- LÓGICA DE WEBSOCKETS ---
-
 const sendCommandWithRetry = (childId, commandMessage, targetMap, mapNameForLog, maxRetries = 3, initialDelay = 1000, currentRetry = 0) => {
     const targetWs = targetMap.get(childId);
-
-    console.log(`[Command-Retry-DEBUG] Tentativa ${currentRetry + 1}: Buscando childId=${childId} no mapa ${mapNameForLog}. Mapa contém: ${Array.from(targetMap.keys()).join(', ')}`);
+    console.log(`[Command-Retry] Tentativa ${currentRetry + 1}: Buscando childId=${childId} no mapa ${mapNameForLog}.`);
 
     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
         targetWs.send(JSON.stringify(commandMessage));
@@ -527,26 +532,25 @@ const sendCommandWithRetry = (childId, commandMessage, targetMap, mapNameForLog,
         console.warn(`[Command-Retry] Filho ${childId} não conectado no mapa ${mapNameForLog} WS (tentativa ${currentRetry + 1}/${maxRetries}).`);
         if (currentRetry < maxRetries) {
             const delay = initialDelay * Math.pow(2, currentRetry);
-            console.log(`[Command-Retry] Re-tentando comando '${commandMessage.type}' para filho ${childId} em ${delay}ms.`);
+            console.log(`[Command-Retry] Re-tentando comando '${commandMessage.type}' em ${delay}ms.`);
             setTimeout(() => {
                 sendCommandWithRetry(childId, commandMessage, targetMap, mapNameForLog, maxRetries, initialDelay, currentRetry + 1);
             }, delay);
         } else {
-            console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' para filho ${childId} após ${maxRetries} tentativas no mapa ${mapNameForLog} WS.`);
+            console.error(`[Command-Retry] Falha ao enviar comando '${commandMessage.type}' após ${maxRetries} tentativas.`);
             const parentWs = parentToWebSocket.get(commandMessage.parentId);
             if (parentWs && parentWs.readyState === WebSocket.OPEN) {
                 parentWs.send(JSON.stringify({
                     type: 'commandFailed',
                     childId: childId,
                     command: commandMessage.type,
-                    message: `Falha ao enviar comando '${commandMessage.type}'. Filho offline ou inacessível.`,
+                    message: `Filho ${childId} offline ou inacessível.`,
                     timestamp: new Date().toISOString()
                 }));
             }
         }
     }
-}
-
+};
 
 wssGeneralCommands.on('connection', ws => {
     ws.id = uuidv4();
@@ -565,7 +569,6 @@ wssGeneralCommands.on('connection', ws => {
 
         try {
             let messageString = rawMessageString;
-
             if (messageString.startsWith('"') && messageString.endsWith('"') && messageString.includes('\\"')) {
                 messageString = messageString.substring(1, messageString.length - 1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
             }
@@ -573,13 +576,13 @@ wssGeneralCommands.on('connection', ws => {
 
             if (typeof finalParsedMessage !== 'object' || finalParsedMessage === null || Array.isArray(finalParsedMessage)) {
                 console.error('[WebSocket-General] Mensagem parseada inválida:', finalParsedMessage);
-                ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido ou corrompido.' }));
+                ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido.' }));
                 return;
             }
 
             console.log('[WebSocket-General] Mensagem JSON recebida:', finalParsedMessage);
 
-            const { type, parentId, childId, childName, latitude, longitude, timestamp, message: chatMessageContent, data } = finalParsedMessage;
+            const { type, parentId, childId, childName, latitude, longitude, timestamp, message: chatMessageContent, messageType, contactOrGroup, direction, phoneNumber, data } = finalParsedMessage;
 
             let effectiveChildId = childId;
             let effectiveChildName = childName;
@@ -595,40 +598,27 @@ wssGeneralCommands.on('connection', ws => {
                 effectiveLatitude = data.latitude || effectiveLatitude;
                 effectiveLongitude = data.longitude || effectiveLongitude;
                 effectiveTimestamp = data.timestamp || effectiveTimestamp;
-                console.log(`[WS-General] Conteúdo de 'data' processado:`, data);
             }
-
-            console.log(`[WS-General] Desestruturado - type: ${type}, parentId: ${effectiveParentId}, childId (effective): ${effectiveChildId}, childName (effective): ${effectiveChildName}`);
 
             switch (type) {
                 case 'parentConnect':
                     ws.currentParentId = effectiveParentId;
                     ws.clientType = 'parent';
-
                     console.log(`[WS-GENERAL-CONN] parentConnect recebido (ID: ${ws.id}). Definido: clientType=${ws.clientType}, currentParentId=${ws.currentParentId}`);
 
                     if (ws.currentParentId) {
-                         if (parentToWebSocket.has(ws.currentParentId)) {
-                             const oldWs = parentToWebSocket.get(ws.currentParentId);
-                             console.log(`[WS-GENERAL-CONN] Removendo conexão pai antiga para ${ws.currentParentId} (Temp ID: ${oldWs ? oldWs.id : 'N/A'}).`);
-                             oldWs.close(1000, 'Nova conexão estabelecida');
-                             parentToWebSocket.delete(ws.currentParentId);
-                             activeConnections.delete(oldWs.id);
-                         }
-                         parentToWebSocket.set(ws.currentParentId, ws);
-                         if (activeConnections.has(ws.id) && ws.id !== ws.currentParentId) {
-                             activeConnections.delete(ws.id);
-                             activeConnections.set(ws.currentParentId, { ws: ws, type: ws.clientType, id: ws.currentParentId });
-                             ws.id = ws.currentParentId;
-                         } else if (!activeConnections.has(ws.currentParentId)) {
-                             activeConnections.set(ws.currentParentId, { ws: ws, type: ws.clientType, id: ws.currentParentId });
-                             ws.id = ws.currentParentId;
-                         }
-
-                         console.log(`[WebSocket-Manager] Conexão parent ${ws.currentParentId} atualizada. Total de entradas ativas: ${activeConnections.size}. Pais conectados: ${Array.from(parentToWebSocket.keys()).join(', ')}`);
-                         ws.send(JSON.stringify({ type: 'parentConnectedSuccess', parentId: ws.currentParentId }));
-                    } else {
-                         console.warn('[WebSocket-General] parentConnect sem parentId.');
+                        if (parentToWebSocket.has(ws.currentParentId)) {
+                            const oldWs = parentToWebSocket.get(ws.currentParentId);
+                            console.log(`[WS-GENERAL-CONN] Removendo conexão pai antiga para ${ws.currentParentId}.`);
+                            oldWs.close(1000, 'Nova conexão estabelecida');
+                            parentToWebSocket.delete(ws.currentParentId);
+                            activeConnections.delete(oldWs.id);
+                        }
+                        parentToWebSocket.set(ws.currentParentId, ws);
+                        activeConnections.set(ws.currentParentId, { ws: ws, type: ws.clientType, id: ws.currentParentId });
+                        ws.id = ws.currentParentId;
+                        console.log(`[WebSocket-Manager] Conexão parent ${ws.currentParentId} atualizada.`);
+                        ws.send(JSON.stringify({ type: 'parentConnectedSuccess', parentId: ws.currentParentId }));
                     }
                     break;
                 case 'childConnect':
@@ -638,29 +628,19 @@ wssGeneralCommands.on('connection', ws => {
                         ws.currentParentId = effectiveParentId;
                         ws.currentChildName = effectiveChildName || 'Desconhecido';
 
-                        console.log(`[WS-GENERAL-CONN] childConnect recebido (ID: ${ws.id}). Definido: clientType=${ws.clientType}, currentChildId=${ws.currentChildId}, currentParentId=${ws.currentParentId}`);
-
                         if (childToWebSocket.has(ws.currentChildId)) {
                             const oldWs = childToWebSocket.get(ws.currentChildId);
-                            console.log(`[WS-GENERAL-CONN] Removendo conexão filho antiga para ${ws.currentChildId} (Temp ID: ${oldWs ? oldWs.id : 'N/A'}).`);
+                            console.log(`[WS-GENERAL-CONN] Removendo conexão filho antiga para ${ws.currentChildId}.`);
                             oldWs.close(1000, 'Nova conexão estabelecida');
-                            childToWebSocket.delete(oldWs.id);
+                            childToWebSocket.delete(ws.currentChildId);
                             activeConnections.delete(oldWs.id);
                         }
                         childToWebSocket.set(ws.currentChildId, ws);
-
-                        if (activeConnections.has(ws.id) && ws.id !== ws.currentChildId) {
-                            activeConnections.delete(ws.id);
-                            activeConnections.set(ws.currentChildId, { ws: ws, type: ws.clientType, id: ws.currentChildId, parentId: ws.currentParentId, name: ws.currentChildName });
-                            ws.id = ws.currentChildId;
-                        } else if (!activeConnections.has(ws.currentChildId)) {
-                            activeConnections.set(effectiveChildId, { ws: ws, type: ws.clientType, id: ws.currentChildId, parentId: ws.currentParentId, name: ws.currentChildName });
-                            ws.id = effectiveChildId;
-                        }
+                        activeConnections.set(ws.currentChildId, { ws: ws, type: ws.clientType, id: ws.currentChildId, parentId: ws.currentParentId, name: ws.currentChildName });
+                        ws.id = ws.currentChildId;
 
                         await updateChildConnectionStatus(ws.currentChildId, true);
-                        console.log(`[DynamoDB] Filho ${ws.currentChildName} (${ws.currentChildId}) status de conexão atualizado para 'true'.`);
-                        console.log(`[WebSocket-Manager] Filho conectado e identificado: ID: ${ws.currentChildId}. Total de entradas ativas: ${activeConnections.size}. Filhos conectados (General WS): ${Array.from(childToWebSocket.keys()).join(', ')}`);
+                        console.log(`[DynamoDB] Filho ${ws.currentChildName} (${ws.currentChildId}) conectado.`);
 
                         const parentWs = parentToWebSocket.get(ws.currentParentId);
                         if (parentWs && parentWs.readyState === WebSocket.OPEN) {
@@ -670,28 +650,23 @@ wssGeneralCommands.on('connection', ws => {
                                 status: 'online',
                                 childName: ws.currentChildName
                             }));
-                            console.log(`[WebSocket-General] Notificação de status 'online' enviada para o pai ${ws.currentParentId} para o filho ${ws.currentChildId}.`);
+                            console.log(`[WebSocket-General] Notificação de status 'online' enviada para o pai ${ws.currentParentId}.`);
                         }
-                    } else {
-                        console.warn('[WebSocket-General] Mensagem childConnect inválida: childId ou parentId faltando.', finalParsedMessage);
                     }
                     break;
                 case 'locationUpdate':
-                    const locChildId = ws.currentChildId;
-                    const locParentId = ws.currentParentId;
-
-                    if (!locChildId || effectiveLatitude === undefined || effectiveLatitude === null || effectiveLongitude === undefined || effectiveLongitude === null) {
-                        console.warn('[WebSocket-General] Mensagem de localização recebida de cliente não identificado ou dados incompletos.');
+                    if (!ws.currentChildId || effectiveLatitude === undefined || effectiveLongitude === undefined) {
+                        console.warn('[WebSocket-General] Dados de localização incompletos.');
                         return;
                     }
-                    console.log(`[Location] Localização recebida do filho ${locChildId}: Lat ${effectiveLatitude}, Lng ${effectiveLongitude}`);
+                    console.log(`[Location] Localização recebida do filho ${ws.currentChildId}: Lat ${effectiveLatitude}, Lng ${effectiveLongitude}`);
 
                     const locationParams = {
                         TableName: TABLE_LOCATIONS,
                         Item: {
                             id: uuidv4(),
                             locationId: uuidv4(),
-                            childId: locChildId,
+                            childId: ws.currentChildId,
                             latitude: effectiveLatitude,
                             longitude: effectiveLongitude,
                             timestamp: effectiveTimestamp || new Date().toISOString()
@@ -699,178 +674,143 @@ wssGeneralCommands.on('connection', ws => {
                     };
                     await docClient.put(locationParams).promise();
 
-                    const connectedParentWsLocation = parentToWebSocket.get(locParentId);
-                    if (connectedParentWsLocation && connectedParentWsLocation.readyState === WebSocket.OPEN) {
-                        connectedParentWsLocation.send(JSON.stringify({
+                    const connectedParentWs = parentToWebSocket.get(ws.currentParentId);
+                    if (connectedParentWs && connectedParentWs.readyState === WebSocket.OPEN) {
+                        connectedParentWs.send(JSON.stringify({
                             type: 'locationUpdate',
-                            childId: locChildId,
+                            childId: ws.currentChildId,
                             latitude: effectiveLatitude,
                             longitude: effectiveLongitude,
                             timestamp: effectiveTimestamp || new Date().toISOString()
                         }));
-                        console.log(`[Location] Localização do filho ${locChildId} encaminhada para o pai ${locParentId}.`);
-                    } else {
-                        console.warn(`[Location] Pai ${locParentId} não encontrado ou offline para receber dados de localização de ${locChildId}.`);
+                        console.log(`[Location] Localização encaminhada para o pai ${ws.currentParentId}.`);
                     }
                     break;
                 case 'chatMessage':
                     const senderId = ws.currentChildId || ws.currentParentId;
-                    const receiverIdFromPayload = effectiveChildId || effectiveParentId;
-
-                    const targetWsReceiver = childToWebSocket.get(receiverIdFromPayload) || parentToWebSocket.get(receiverIdFromPayload);
-                    const actualReceiverId = targetWsReceiver ? targetWsReceiver.id : receiverIdFromPayload;
-
+                    const receiverId = effectiveChildId || effectiveParentId;
                     const senderName = ws.clientType === 'child' ? ws.currentChildName : 'Pai';
 
-                    if (!senderId || !receiverIdFromPayload || !chatMessageContent) {
-                        console.warn('[WebSocket-General] Mensagem de chat inválida: IDs ou mensagem ausentes.');
+                    if (!senderId || !receiverId || !chatMessageContent) {
+                        console.warn('[WebSocket-General] Mensagem de chat inválida.');
                         return;
                     }
-                    console.log(`[Chat] Mensagem de ${senderName} (${senderId}) para ${receiverIdFromPayload}: ${chatMessageContent}`);
+                    console.log(`[Chat] Mensagem de ${senderName} (${senderId}) para ${receiverId}: ${chatMessageContent}`);
+
+                    let conversationId;
+                    if (messageType !== 'APP_CHAT_MESSAGE') {
+                        conversationId = await updateConversation(senderId, contactOrGroup || 'Desconhecido', effectiveTimestamp || Date.now(), chatMessageContent, messageType || 'text', direction || 'unknown');
+                    } else {
+                        conversationId = uuidv4();
+                    }
 
                     const messageParams = {
                         TableName: TABLE_MESSAGES,
                         Item: {
                             id: uuidv4(),
                             messageId: uuidv4(),
+                            conversationId: conversationId,
                             senderId: senderId,
-                            receiverId: receiverIdFromPayload,
+                            receiverId: receiverId,
                             messageText: chatMessageContent,
-                            timestamp: new Date().toISOString(),
-                            messageType: 'APP_CHAT_MESSAGE'
+                            timestamp: effectiveTimestamp || new Date().toISOString(),
+                            messageType: messageType || 'text',
+                            contactOrGroup: contactOrGroup || 'N/A',
+                            direction: direction || 'unknown',
+                            phoneNumber: phoneNumber || 'unknown_number'
                         }
                     };
                     await docClient.put(messageParams).promise();
-                    console.log(`[DynamoDB] Mensagem de chat interna salva de ${senderId} para ${receiverIdFromPayload}.`);
+                    console.log(`[Chat] Mensagem salva: ${messageParams.Item.messageId}`);
 
-
-                    if (targetWsReceiver && targetWsReceiver.readyState === WebSocket.OPEN) {
-                        targetWsReceiver.send(JSON.stringify({
+                    const targetWs = childToWebSocket.get(receiverId) || parentToWebSocket.get(receiverId);
+                    if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                        targetWs.send(JSON.stringify({
                             type: 'chatMessage',
                             senderId: senderId,
-                            receiverId: receiverIdFromPayload,
+                            receiverId: receiverId,
                             message: chatMessageContent,
-                            timestamp: new Date().toISOString(),
-                            senderName: senderName
+                            timestamp: effectiveTimestamp || new Date().toISOString(),
+                            messageType: messageType || 'text',
+                            contactOrGroup: contactOrGroup || 'N/A',
+                            direction: direction || 'unknown',
+                            senderName: senderName,
+                            phoneNumber: phoneNumber || 'unknown_number'
                         }));
-                        console.log(`[Chat] Mensagem encaminhada para ${receiverIdFromPayload}.`);
-                    } else {
-                        console.warn(`[Chat] Receptor ${receiverIdFromPayload} não encontrado ou offline.`);
+                        console.log(`[Chat] Mensagem encaminhada para ${receiverId}.`);
                     }
                     break;
                 case 'requestLocation':
-                    const reqLocChildId = effectiveChildId;
-                    if (ws.clientType !== 'parent' || !reqLocChildId) {
-                        console.warn(`[WebSocket-General] Requisição de localização inválida: clientType='${ws.clientType}' (esperado 'parent') ou childId='${reqLocChildId}' ausente.`);
+                    if (ws.clientType !== 'parent' || !effectiveChildId) {
+                        console.warn('[WebSocket-General] Requisição de localização inválida.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de localização inválida.' }));
                         return;
                     }
-                    sendCommandWithRetry(reqLocChildId, { type: 'startLocationUpdates', parentId: effectiveParentId }, childToWebSocket, 'General');
-                    ws.send(JSON.stringify({ type: 'info', message: `Solicitando localização para ${reqLocChildId}.` }));
+                    sendCommandWithRetry(effectiveChildId, { type: 'startLocationUpdates', parentId: effectiveParentId }, childToWebSocket, 'General');
+                    ws.send(JSON.stringify({ type: 'info', message: `Solicitando localização para ${effectiveChildId}.` }));
                     break;
-
                 case 'stopLocationUpdates':
-                    const stopLocChildId = effectiveChildId;
-
-                    if (ws.clientType !== 'parent' || !stopLocChildId) {
-                        console.warn(`[WebSocket-General] Requisição de parada de localização inválida: clientType='${ws.clientType}' (esperado 'parent') ou childId='${stopLocChildId}' ausente.`);
+                    if (ws.clientType !== 'parent' || !effectiveChildId) {
+                        console.warn('[WebSocket-General] Requisição de parada de localização inválida.');
                         ws.send(JSON.stringify({ type: 'error', message: 'Requisição de parada de localização inválida.' }));
                         return;
                     }
-                    sendCommandWithRetry(stopLocChildId, { type: 'stopLocationUpdates', parentId: effectiveParentId }, childToWebSocket, 'General');
+                    sendCommandWithRetry(effectiveChildId, { type: 'stopLocationUpdates', parentId: effectiveParentId }, childToWebSocket, 'General');
                     ws.send(JSON.stringify({
                         type: 'locationCommandStatus',
                         status: 'sent',
-                        childId: stopLocChildId,
-                        message: `Comando 'stopLocationUpdates' enviado para ${stopLocChildId}.`
+                        childId: effectiveChildId,
+                        message: `Comando 'stopLocationUpdates' enviado.`
                     }));
                     break;
                 case 'startAudioStream':
-                    console.log(`[WS-General] Comando 'startAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
-                    const targetChildIdAudioCommand = effectiveChildId;
-                    const parentIdForAudio = effectiveParentId;
-
-                    parentListeningToChild.set(parentIdForAudio, targetChildIdAudioCommand);
-                    console.log(`[WS-General] Pai ${parentIdForAudio} AGORA está ouvindo o filho ${targetChildIdAudioCommand}.`);
-
-
-                    sendCommandWithRetry(targetChildIdAudioCommand, { type: 'startRecording', parentId: parentIdForAudio }, activeAudioControlClients, 'AudioControl', 5, 500, 0);
+                    console.log(`[WS-General] Comando 'startAudioStream' recebido para filho: ${effectiveChildId}.`);
+                    parentListeningToChild.set(effectiveParentId, effectiveChildId);
+                    sendCommandWithRetry(effectiveChildId, { type: 'startRecording', parentId: effectiveParentId }, activeAudioControlClients, 'AudioControl', 5, 500, 0);
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
                         status: 'activating',
-                        childId: targetChildIdAudioCommand,
-                        message: `Ativando canal de áudio para ${targetChildIdAudioCommand}.`
+                        childId: effectiveChildId,
+                        message: `Ativando canal de áudio para ${effectiveChildId}.`
                     }));
                     break;
-
                 case 'stopAudioStream':
-                    console.log(`[WS-General] Comando 'stopAudioStream' recebido do pai para filho: ${effectiveChildId}.`);
-                    const targetChildIdStopAudio = effectiveChildId;
-                    const parentIdForStopAudio = effectiveParentId;
-
-                    sendCommandWithRetry(targetChildIdStopAudio, { type: 'stopAudioStreamFromServer', parentId: parentIdForStopAudio }, activeAudioControlClients, 'AudioControl', 5, 500, 0);
-
-                    parentListeningToChild.delete(parentIdForStopAudio);
-                    console.log(`[WS-GENERAL-CLOSE] Pai ${parentIdForStopAudio} desconectado. Registro de escuta limpo.`);
-
+                    console.log(`[WS-General] Comando 'stopAudioStream' recebido para filho: ${effectiveChildId}.`);
+                    sendCommandWithRetry(effectiveChildId, { type: 'stopAudioStreamFromServer', parentId: effectiveParentId }, activeAudioControlClients, 'AudioControl', 5, 500, 0);
+                    parentListeningToChild.delete(effectiveParentId);
                     ws.send(JSON.stringify({
                         type: 'audioCommandStatus',
                         status: 'stopped',
-                        childId: targetChildIdStopAudio,
-                        message: `Comando 'stopAudioStreamFromServer' enviado para ${targetChildIdStopAudio}.`
+                        childId: effectiveChildId,
+                        message: `Comando 'stopAudioStreamFromServer' enviado.`
                     }));
                     break;
                 default:
                     console.warn('[WebSocket-General] Tipo de mensagem desconhecido:', type);
             }
         } catch (error) {
-            console.error('[WebSocket-General] Erro crítico ao processar mensagem:', error.message);
-            const rawMessageDebug = (Buffer.isBuffer(message) ? message.toString('utf8') : message);
-            console.error('[WebSocket-General] Mensagem original (raw):', rawMessageDebug);
-            ws.send(JSON.stringify({ type: 'error', message: `Erro interno ao processar sua mensagem: ${error.message}` }));
+            console.error('[WebSocket-General] Erro ao processar mensagem:', error.message);
+            ws.send(JSON.stringify({ type: 'error', message: `Erro interno: ${error.message}` }));
         }
     });
 
     ws.on('close', async (code, reason) => {
-        console.log(`[WS-GENERAL-CLOSE] Cliente desconectado (ID: ${ws.id || 'desconhecido'}). Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
-        console.log(`[WS-GENERAL-CLOSE-DEBUG] Fechando WS. childToWebSocket antes: ${Array.from(childToWebSocket.keys()).join(', ')}. parentToWebSocket antes: ${Array.from(parentToWebSocket.keys()).join(', ')}. Active Connections antes: ${Array.from(activeConnections.keys()).join(', ')}`);
+        console.log(`[WS-GENERAL-CLOSE] Cliente desconectado (ID: ${ws.id}). Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
 
-        const disconnectedId = ws.id;
-
-        activeConnections.delete(disconnectedId);
-
+        activeConnections.delete(ws.id);
         if (ws.clientType === 'child' && ws.currentChildId) {
-            if (childToWebSocket.has(ws.currentChildId) && childToWebSocket.get(ws.currentChildId) === ws) {
-                childToWebSocket.delete(ws.currentChildId);
-                console.log(`[WS-GENERAL-CLOSE] Filho ${ws.currentChildId} removido do childToWebSocket.`);
-            } else {
-                console.warn(`[WS-GENERAL-CLOSE] Filho ${ws.currentChildId} não encontrado ou já substituído no childToWebSocket.`);
-            }
-            try {
-                await updateChildConnectionStatus(ws.currentChildId, false);
-            } catch (error) {
-                console.error('Erro ao atualizar status de conexão do filho no DynamoDB:', error);
-            }
+            childToWebSocket.delete(ws.currentChildId);
+            await updateChildConnectionStatus(ws.currentChildId, false);
             for (let [parentId, listeningChildId] of parentListeningToChild.entries()) {
                 if (listeningChildId === ws.currentChildId) {
                     parentListeningToChild.delete(parentId);
-                    console.log(`[WS-GENERAL-CLOSE] Pai ${parentId} parou de ouvir o filho ${ws.currentChildId} (desconectado).`);
                 }
             }
         } else if (ws.clientType === 'parent' && ws.currentParentId) {
-            if (parentToWebSocket.has(ws.currentParentId) && parentToWebSocket.get(ws.currentParentId) === ws) {
-                parentToWebSocket.delete(ws.currentParentId);
-                console.log(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} removido do parentToWebSocket.`);
-            } else {
-                console.warn(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} não encontrado ou já substituído no parentToWebSocket.`);
-            }
-             console.log(`[WebSocket-General] Pai ${ws.currentParentId} desconectado.`);
+            parentToWebSocket.delete(ws.currentParentId);
             parentListeningToChild.delete(ws.currentParentId);
-            console.log(`[WS-GENERAL-CLOSE] Pai ${ws.currentParentId} desconectado. Registro de escuta limpo.`);
-        } else {
-             console.warn(`[WS-GENERAL-CLOSE] Cliente desconectado de tipo desconhecido ou sem ID principal (ID: ${disconnectedId}).`);
         }
-        console.log(`[WebSocket-Manager] Total de entradas ativas (após remoção): ${activeConnections.size}. Filhos conectados (General WS): ${Array.from(childToWebSocket.keys()).join(', ')}. Pais conectados: ${Array.from(parentToWebSocket.keys()).join(', ')}`);
+        console.log(`[WebSocket-Manager] Total de conexões ativas: ${activeConnections.size}.`);
     });
 
     ws.on('error', error => {
@@ -884,7 +824,7 @@ wssAudioControl.on('connection', ws => {
     ws.currentParentId = null;
     ws.currentChildId = null;
 
-    console.log(`[WS-AUDIO-CONTROL-CONN] Nova conexão WS de controle de áudio (Temp ID: ${ws.id}). Estado inicial: clientType=${ws.clientType}`);
+    console.log(`[WS-AUDIO-CONTROL-CONN] Nova conexão WS de controle de áudio (Temp ID: ${ws.id}).`);
     activeConnections.set(ws.id, { ws: ws, type: ws.clientType, tempId: ws.id });
 
     ws.on('message', async message => {
@@ -901,7 +841,7 @@ wssAudioControl.on('connection', ws => {
 
             if (typeof finalParsedMessage !== 'object' || finalParsedMessage === null || Array.isArray(finalParsedMessage)) {
                 console.error('[WebSocket-AudioControl] Mensagem parseada inválida:', finalParsedMessage);
-                ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido ou corrompido.' }));
+                ws.send(JSON.stringify({ type: 'error', message: 'Formato de mensagem JSON inválido.' }));
                 return;
             }
 
@@ -919,81 +859,52 @@ wssAudioControl.on('connection', ws => {
 
             switch (type) {
                 case 'childConnectAudioControl':
-                    console.log(`[WS-AUDIO-CONTROL-CONN] Recebido childConnectAudioControl do filho ${effectiveChildId}. Conexão Temp ID: ${ws.id}.`);
-
                     ws.clientType = 'child-audio-control';
                     ws.currentChildId = effectiveChildId;
                     ws.currentParentId = effectiveParentId;
 
                     if (activeAudioControlClients.has(effectiveChildId)) {
                         const oldWs = activeAudioControlClients.get(effectiveChildId);
-                        console.log(`[WS-AUDIO-CONTROL-CONN] Removendo conexão de controle de áudio antiga para ${effectiveChildId} (Temp ID: ${oldWs ? oldWs.id : 'N/A'}).`);
                         oldWs.close(1000, 'Nova conexão estabelecida');
                         activeAudioControlClients.delete(effectiveChildId);
                         activeConnections.delete(oldWs.id);
                     }
 
                     activeAudioControlClients.set(effectiveChildId, ws);
-                    if (activeConnections.has(ws.id) && ws.id !== effectiveChildId) {
-                        activeConnections.delete(ws.id);
-                        activeConnections.set(effectiveChildId, { ws: ws, type: ws.clientType, id: effectiveChildId });
-                        ws.id = effectiveChildId;
-                    } else if (!activeConnections.has(effectiveChildId)) {
-                        activeConnections.set(effectiveChildId, { ws: ws, type: ws.clientType, id: effectiveChildId });
-                        ws.id = effectiveChildId;
-                    }
+                    activeConnections.set(effectiveChildId, { ws: ws, type: ws.clientType, id: effectiveChildId });
+                    ws.id = effectiveChildId;
 
-                    console.log(`[WS-AUDIO-CONTROL-CONN] Filho ${effectiveChildId} ADICIONADO ao activeAudioControlClients. Mapa agora contém: ${Array.from(activeAudioControlClients.keys()).join(', ')}. Tamanho do mapa: ${activeAudioControlClients.size}.`);
+                    console.log(`[WS-AUDIO-CONTROL-CONN] Filho ${effectiveChildId} conectado ao canal de controle de áudio.`);
 
                     if (pendingAudioRequests.has(effectiveChildId)) {
                         ws.send(JSON.stringify({ type: 'startRecording' }));
-                        console.log(`[Audio-Command-Server] Comando 'startRecording' ENVIADO para filho ${effectiveChildId} (requisição pendente).`);
                         pendingAudioRequests.delete(effectiveChildId);
                     }
                     break;
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong' }));
-                    console.log(`[WS-AudioControl] Pong enviado em resposta ao ping do ID ${ws.id}.`);
+                    console.log(`[WS-AudioControl] Pong enviado para ${ws.id}.`);
                     break;
                 case 'pong':
-                    console.log(`[WS-AudioControl] Pong recebido do cliente ${ws.id}.`);
-                    break;
-                case 'startRecording':
-                case 'stopAudioStreamFromServer':
-                    console.warn(`[WebSocket-AudioControl] Mensagem de tipo ${type} recebida de CLIENTE inesperado. Este tipo de mensagem é para SERVER->CHILD.`);
-                    ws.send(JSON.stringify({ type: 'error', message: 'Tipo de mensagem inesperado neste canal.' }));
-                    break;
-                case 'audioData':
-                    console.warn(`[WS-AudioControl] Mensagem 'audioData' recebida inesperadamente no canal de controle de áudio. Deve ir para /ws-audio-data.`);
-                    ws.send(JSON.stringify({ type: 'error', message: 'Mensagem de dados de áudio recebida no canal de controle.' }));
+                    console.log(`[WS-AudioControl] Pong recebido de ${ws.id}.`);
                     break;
                 default:
                     console.warn('[WebSocket-AudioControl] Tipo de mensagem desconhecido:', type);
                     ws.send(JSON.stringify({ type: 'error', message: 'Tipo de mensagem desconhecido.' }));
             }
         } catch (error) {
-            console.error('[WebSocket-AudioControl] Erro crítico ao processar mensagem:', error.message);
-            const rawMessageDebug = (Buffer.isBuffer(message) ? message.toString('utf8') : message);
-            console.error('[WebSocket-AudioControl] Mensagem original (raw):', rawMessageDebug);
-            ws.send(JSON.stringify({ type: 'error', message: `Erro interno ao processar sua mensagem: ${error.message}` }));
+            console.error('[WebSocket-AudioControl] Erro ao processar mensagem:', error.message);
+            ws.send(JSON.stringify({ type: 'error', message: `Erro interno: ${error.message}` }));
         }
     });
 
     ws.on('close', (code, reason) => {
-        console.log(`[WS-AUDIO-CONTROL-CLOSE] Cliente desconectado (ID: ${ws.id || 'desconhecido'}). Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
-        console.log(`[WS-AUDIO-CONTROL-CLOSE-DEBUG] Fechando WS. activeAudioControlClients antes: ${Array.from(activeAudioControlClients.keys()).join(', ')}. Active Connections antes: ${Array.from(activeConnections.keys()).join(', ')}`);
-
+        console.log(`[WS-AUDIO-CONTROL-CLOSE] Cliente desconectado (ID: ${ws.id}). Código: ${code}, Razão: ${reason ? reason.toString() : 'N/A'}`);
         activeConnections.delete(ws.id);
-
         if (ws.clientType === 'child-audio-control' && ws.currentChildId) {
-            if (activeAudioControlClients.has(ws.currentChildId) && activeAudioControlClients.get(ws.currentChildId) === ws) {
-                activeAudioControlClients.delete(ws.currentChildId);
-                console.log(`[WS-AUDIO-CONTROL-CLOSE] Cliente de controle de áudio do filho ${ws.currentChildId} removido.`);
-            } else {
-                console.warn(`[WS-AUDIO-CONTROL-CLOSE] Cliente de controle de áudio do filho ${ws.currentChildId} não encontrado ou já substituído.`);
-            }
+            activeAudioControlClients.delete(ws.currentChildId);
         }
-        console.log(`[WS-AUDIO-CONTROL-CLOSE] Total de conexões de controle de áudio: ${activeAudioControlClients.size}. Total de entradas ativas (após remoção): ${activeConnections.size}.`);
+        console.log(`[WS-AUDIO-CONTROL-CLOSE] Total de conexões de controle de áudio: ${activeAudioControlClients.size}.`);
     });
 
     ws.on('error', error => {
@@ -1001,16 +912,15 @@ wssAudioControl.on('connection', ws => {
     });
 });
 
-
 // --- INICIO DO SERVIDOR ---
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Servidor HTTP/WebSocket rodando na porta ${PORT}`);
     console.log(`Endpoint de upload de áudio: http://localhost:${PORT}/upload-audio`);
-    console.log(`Endpoint de upload de mídia (geral): http://localhost:${PORT}/upload-media`);
+    console.log(`Endpoint de upload de mídia: http://localhost:${PORT}/upload-media`);
     console.log(`Endpoint de registro de filho: http://localhost:${PORT}/register-child`);
-    console.log(`Endpoint de notificação (WhatsApp): http://localhost:${PORT}/send-notification`);
-    console.log(`Endpoint para listar conversas (do pai): http://localhost:${PORT}/conversations/:parentId`);
-    console.log(`Endpoint para listar mensagens (da conversa): http://localhost:${PORT}/messages/:childId/:conversationId`); // Atualizado aqui
+    console.log(`Endpoint de notificação: http://localhost:${PORT}/send-notification`);
+    console.log(`Endpoint para listar conversas: http://localhost:${PORT}/conversations/:parentId`);
+    console.log(`Endpoint para listar mensagens: http://localhost:${PORT}/messages/:childId/:conversationId`);
     console.log(`WebSocket de comandos gerais em: ws://localhost:${PORT}/ws-general-commands`);
     console.log(`WebSocket de controle de áudio em: ws://localhost:${PORT}/ws-audio-control`);
     console.log(`Região AWS configurada via env: ${process.env.AWS_REGION || 'Não definida'}`);
