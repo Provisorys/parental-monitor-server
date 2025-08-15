@@ -210,7 +210,7 @@ app.post('/upload-audio', audioUpload.single('audio'), async (req, res) => {
 });
 
 // Rota de upload de mídia geral (imagens, vídeos, áudios do WhatsApp)
-app.post('/upload-media', upload.single('media'), async (req, res) => {
+app.post('/upload-media', upload.single('mediaFile'), async (req, res) => {
     if (!req.file) {
         return res.status(400).send('Nenhum arquivo de mídia enviado.');
     }
